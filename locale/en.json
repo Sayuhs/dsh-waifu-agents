@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Waifu Agents",
+    "description": "Registers every *.md in a persona directory as an agent preset, and manages them from the Plugins settings page."
+  }
+}

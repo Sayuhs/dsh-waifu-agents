@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Waifu Agents",
+    "description": "把一个人设目录里的每个 *.md 注册成 agent preset，并可以在「插件」设置页里新增、编辑、删除。"
+  }
+}

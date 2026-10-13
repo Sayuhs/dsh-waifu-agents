@@ -1,0 +1,9 @@
+# Bundle layer for dsh-waifu-agents.
+#
+# Mounts this package's own Host plugin, named by bare package name so it
+# resolves from wherever the profile installs it. The plugin scans its own
+# personas/ directory (import.meta.url-relative) unless config.dir overrides
+# it, and registers each *.md as an agent preset.
+- insert:
+    - id: waifu-agents
+      name: dsh-waifu-agents

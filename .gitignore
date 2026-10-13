@@ -1,0 +1,14 @@
+# Dependencies are installed, never committed: `pnpm install` rebuilds this tree,
+# and one accidental commit of it already sits in the history (0.2.x).
+node_modules/
+
+# Scratch directories written and removed by selftest.mjs.
+.tmp-*/
+
+# Tarballs from `pnpm pack`.
+*.tgz
+
+# Editor and OS noise.
+.DS_Store
+Thumbs.db
+*.log
