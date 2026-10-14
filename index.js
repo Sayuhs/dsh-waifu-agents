@@ -1036,6 +1036,38 @@ export function apply(ctx, config = {}) {
   /** Enough to name every identity the model could still be carrying. */
   const SERVED_NAMES_LIMIT = 4;
 
+  /**
+   * The persona each session was served at its LAST assembly.
+   *
+   * The question both the switch notice and the identity snapshot need answered
+   * is「这一轮要说的人设，和上一轮说的是同一个吗」— and the answer cannot come
+   * from the persona's SOURCE. `source === 'override'` was the old test for "this
+   * session was moved", and it is false on the way BACK: `/waifu-reset` (or a
+   * change to whichever persona the session is mounted on) resolves through the
+   * `mounted` rung while the conversation is still full of the persona served a
+   * moment ago.
+   *
+   * Measured in `session-a367789b`: `/waifu-reset` from 照桥心美 to the mounted
+   * 达克妮斯 rewrote the system node CORRECTLY (`system/message` carried 达克妮斯
+   * with no notice in front of it), the runtime snapshot silently dropped its
+   * identity section instead of naming the new persona, and the model answered as
+   * 照桥心美 — 「user (Somnivalis) asks 你是谁 … Komi would react with shock」 —
+   * its own earlier turns were the anchor, exactly as {@link identityNoticeOf}
+   * documents. A change is a change, whichever rung it lands on.
+   */
+  const servedIds = new Map();
+
+  /**
+   * The last persona CHANGE per session: `{ id, previousId, previousName }`.
+   *
+   * A memo, not a counter: it is read back by both the persona text and the
+   * identity snapshot for as long as that persona is the one being served, so
+   * re-rendering an assembly cannot consume it or fire it twice. The loop only
+   * commits a runtime snapshot whose TEXT changed, so a memo that stays put
+   * produces no repeated message.
+   */
+  const lastSwitch = new Map();
+
   /** Cached global default: the provider is synchronous, this read is not. */
   let cachedDefault = { id: null, field: undefined, source: null, error: null, at: 0 };
 
@@ -1159,13 +1191,88 @@ export function apply(ctx, config = {}) {
   }
 
   /**
-   * The switch notice: in front of an overridden persona, and again behind it.
+   * Record what this assembly serves, and remember it when the persona CHANGED.
+   *
+   * Called from the persona variable provider, which the assembler resolves
+   * BEFORE it renders the `systemPrompt.context()` contributions
+   * (`.ref/system-prompt.js`: `variables[name] = provider(context)` at :315, the
+   * context texts at :348), and `assemble()` runs once per step. That order is
+   * what lets {@link identityNoticeOf} read the memo back inside the same
+   * assembly, so the prompt and the snapshot always describe one turn.
+   *
+   * The FIRST sighting of a session records "nothing to re-anchor" rather than a
+   * change: a session that was never switched has a single voice, and its request
+   * must stay byte-for-byte what it would have been without this feature.
+   *
+   * @param {string} sessionId
+   * @param {{ id: string, name: string }} found the persona about to be served
+   * @param {string} [previousName] the name served before this one, if any
+   * @returns {boolean} whether this turn is a change
+   */
+  function noteServed(sessionId, found, previousName) {
+    if (sessionId === "") return false;
+    const seen = servedIds.get(sessionId);
+    const changed = seen !== undefined && seen.id !== found.id;
+    if (changed)
+      lastSwitch.set(sessionId, {
+        id: found.id,
+        previousId: seen.id,
+        previousName: oneLine(previousName) || seen.name,
+      });
+    else if (seen === undefined) lastSwitch.set(sessionId, null);
+    servedIds.set(sessionId, { id: found.id, name: found.name });
+    return changed;
+  }
+
+  /**
+   * The change this session is currently in the middle of, or null.
+   *
+   * Keyed on the persona being served, so the memo survives every later
+   * assembly of the same persona (same answer, same text, no new snapshot) and
+   * is replaced by the next change.
+   * @param {string} sessionId
+   * @param {{ id: string }} found the persona about to be served
+   * @returns {{ id: string, previousId: string, previousName: string } | null}
+   */
+  function switchOf(sessionId, found) {
+    const memo = lastSwitch.get(sessionId);
+    if (memo === undefined || memo === null) return null;
+    return memo.id === found.id ? memo : null;
+  }
+
+  /**
+   * Does this session need the identity said out loud — now, or since the last change?
+   *
+   * True while the persona being served is one this session did not start out
+   * with: chosen out of band (an override — `/waifu-change`, the picker, a write
+   * from the panel) or the target of the most recent change (`/waifu-reset`
+   * included). It stays true for as long as that persona is served, which is what
+   * the shipped behaviour already did for overrides; keeping it that way also
+   * keeps the served text identical from turn to turn, so the loop rewrites the
+   * prompt once at the change instead of on every step.
+   * @param {string} sessionId
+   * @param {{ id: string, source: string }} found the persona about to be served
+   * @returns {boolean}
+   */
+  function reAnchored(sessionId, found) {
+    return found.source === "override" || switchOf(sessionId, found) !== null;
+  }
+
+  /**
+   * The switch notice: in front of a persona that REPLACES another one, and again behind it.
    *
    * The persona text IS a system prompt, but swapping it mid-conversation is a
    * weak signal: the history is already full of the previous voice, so a model
    * that keeps answering as her is the single most-reported "换人没生效". Saying
-   * it in the served text is what re-anchors that turn. The mounted case needs no
-   * line, because there the text never changed under a running conversation.
+   * it in the served text is what re-anchors that turn.
+   *
+   * "Replaces another one" is a fact about the SESSION, not about which rung the
+   * persona came off — the first sentence of this comment used to promise that
+   * 「the mounted case needs no line, because there the text never changed under a
+   * running conversation」, and the log in {@link servedIds} shows the `mounted`
+   * rung arriving mid-conversation with a whole other persona behind it. The line
+   * is emitted whenever the served persona changed, mounted or not; see
+   * {@link noteServed}.
    *
    * It is said TWICE on purpose. `@deepseek-ai/dsh-persona` mounts this text as
    * the one `complete: true` section, so the served string is the WHOLE prompt —
@@ -1480,10 +1587,14 @@ export function apply(ctx, config = {}) {
       const found = sessionPersona(sessionId, mountedId);
       if (found.text !== null) {
         const before = sessionId === "" ? [] : (servedNames.get(sessionId) ?? []);
-        const served =
-          found.source === "override"
-            ? withSwitchNotice(found.text, found.name, before)
-            : found.text;
+        // Recorded here, not by the caller: this provider is the only place that
+        // knows what a turn was actually served, and it runs first (see
+        // `noteServed`). What decides the notice is「这一轮的人设和上一轮不同」
+        // — a fact about the session, not about which rung served it.
+        noteServed(sessionId, found, before[before.length - 1]);
+        const served = reAnchored(sessionId, found)
+          ? withSwitchNotice(found.text, found.name, before)
+          : found.text;
         if (sessionId !== "") {
           lastGood.set(sessionId, served);
           servedNames.set(
@@ -1552,6 +1663,12 @@ export function apply(ctx, config = {}) {
    * single voice and needs no reminder, and staying silent keeps its prompt
    * byte-for-byte what it was before this existed.
    *
+   * The condition is「这一轮的人设和上一轮不同」, never「它是从 override 那一层
+   * 解析出来的」. The second reading is what shipped first, and `/waifu-reset` is
+   * its counter-example: coming back to the mounted persona resolves through the
+   * `mounted` rung, so the reminder went silent on the one turn the model had a
+   * competing voice to drop. See {@link servedIds} for the measurement.
+   *
    * @param {unknown} agent the live agent
    * @returns {string} the snapshot text, or `''` when there is nothing to say
    */
@@ -1562,10 +1679,15 @@ export function apply(ctx, config = {}) {
     try {
       const found = sessionPersona(sessionId, anchorOf(agent));
       if (found.id === null) return "";
-      // Only a session that was MOVED needs saying. The mounted case never had a
-      // competing voice, so a reminder there would be noise in every request.
-      if (found.source !== "override") return "";
-      return `【本轮身份 · 运行时确认】这个会话现在的人设是「${found.name}」。上面更早出现的其它人设、以及你自己之前以别人身份说过的话，从现在起全部作废：按「${found.name}」说话、按她的口气思考。不要向用户解释这次变化，也不要提你「之前」是谁。`;
+      // "Did the persona change" — asked of the session, not of the rung it came
+      // off. The old test here was `found.source !== "override"`, which is true on
+      // the way back to the mounted persona and silenced exactly the reset that
+      // needed the reminder most (see `servedIds`).
+      const moved = switchOf(sessionId, found);
+      if (moved === null && found.source !== "override") return "";
+      const was = moved === null ? "" : moved.previousName;
+      const from = was !== "" && was !== found.name ? `（上一轮还是「${was}」）` : "";
+      return `【本轮身份 · 运行时确认】这个会话现在的人设是「${found.name}」${from}。上面更早出现的其它人设、以及你自己之前以别人身份说过的话，从现在起全部作废：按「${found.name}」说话、按她的口气思考。不要向用户解释这次变化，也不要提你「之前」是谁。`;
     } catch (error) {
       // Never throw: this runs inside `assemble()`, and a throw there fails the
       // whole request. Serving the previous identity one turn too long is the

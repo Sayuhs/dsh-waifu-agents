@@ -36,9 +36,13 @@
 - **`order` 注册时整体加 `PERSONA_ORDER_BASE`（10000）。** registry 的排序是**单一全局键**（`(a.order ?? Infinity) - (b.order ?? Infinity) || a.id.localeCompare(b.id)`，`dsh-agent-preset-registry`），四个内置模式占 1..4，而面板的拖拽只写 1..n——两家人落在同一个区间里，新任务页就会读出 `后藤一里 / standard / 大肥鱼 / ptc / …`。偏移**只在注册时**加，文件里留的仍是局部序号。改这个常量等于改「人设能排到多低」，别往小改。
 - **换人的提示词读两头都写一遍，是刻意的。** `dsh-agent-loop` 的 `SystemPromptProjection.project()` 有两条路：`startsSeries`（或 `inHistory === false`）时**原地重写节点 0 并清空后面所有 system 节点**；反之在历史中间时，文本一变是 `surfaceOp: {op:'append'}` **追加一个新节点**——也就是说旧人设的正文还留在上下文里。只在开头说一次，模型很容易漂回上一位（这是「换人没生效」最常见的真身，日志里表现为命令回了「已切换」而下一轮的口吻没变）。`withSwitchNotice()` 因此前缀点名作废、后缀做最后确认。
 - **重复切到同一个人不能回「已切换」。** 提示词一个字没变时，`project()` 返回空更新，不会有新的 system 节点，模型也不会被重新锚定——那句「已切换」是假话。`waifu-change` 用 `already === matched.id` 判出来，改回「本来就是 X · 没有改动」。
-- **光改系统提示词仍然不够，真正落地靠「运行时快照」这条旁路。** 双写之后模型照样能拧回来：它拿**自己前几轮以旧身份说过的话**当锚，越问越犟。实测（`session-b6fb8a2b`）：同一会话连切三次，三次请求的 system 节点都已经是新人设（`contextBreakdown.breakdown.systemTokens` 与唯一的 `system: true` 节点可证，且 `cacheReadTokens: 0`——内容确实换过），模型仍然三轮都自称第一位。病灶是位置：`project()` 在历史中间走 `append`，旧人设正文与**旧回答**都留着，而离提问最近的锚是它自己的输出。解法是再开一条**用户角色**的通道：注册 `ctx.systemPrompt.context({ name: 'waifu-agents:identity', order: 900, text })`（`IDENTITY_CONTEXT_NAME` / `IDENTITY_CONTEXT_ORDER`），为**每个 agent 每轮**生成一句「本轮身份 · 运行时确认」，交给平台自己的 `RuntimeContextProjection` 投影成一条 USER 消息、紧跟用户提问成为请求的最后一条。那句快照天生带「本条作废更早的快照」的语义，`preStep`（`agent-loop.js:902-924`）每轮都发，**只在身份变过时**才有内容（`identityNoticeOf()` 对 `source !== 'override'` 和空会话回 `""`）。
+- **光改系统提示词仍然不够，真正落地靠「运行时快照」这条旁路。** 双写之后模型照样能拧回来：它拿**自己前几轮以旧身份说过的话**当锚，越问越犟。实测（`session-b6fb8a2b`）：同一会话连切三次，三次请求的 system 节点都已经是新人设（`contextBreakdown.breakdown.systemTokens` 与唯一的 `system: true` 节点可证，且 `cacheReadTokens: 0`——内容确实换过），模型仍然三轮都自称第一位。病灶是位置：`project()` 在历史中间走 `append`，旧人设正文与**旧回答**都留着，而离提问最近的锚是它自己的输出。解法是再开一条**用户角色**的通道：注册 `ctx.systemPrompt.context({ name: 'waifu-agents:identity', order: 900, text })`（`IDENTITY_CONTEXT_NAME` / `IDENTITY_CONTEXT_ORDER`），为**每个 agent 每轮**生成一句「本轮身份 · 运行时确认」，交给平台自己的 `RuntimeContextProjection` 投影成一条 USER 消息、紧跟用户提问成为请求的最后一条。那句快照天生带「本条作废更早的快照」的语义，`preStep`（`agent-loop.js:902-924`）每轮都发，**只在身份变过时**才有内容——判据是「这一轮要服务的人设，和上一轮服务过的不是同一个」（`servedIds` / `noteServed` / `switchOf`），空会话、以及从未换过人的会话回 `""`。
   - 两条硬约束：① 这段文本同样会被 `interpolate()` 处理，**不能**出现 `{{…}}`，否则整条渲染失败；② `template.json` 里 `persona` 那一行的 `includeRuntimeContext` **必须是 `true`**。设成 `false` 时 `@deepseek-ai/dsh-persona` 会调 `ctx.systemPrompt.suppressRuntimeContext()`，那是**调用作用域级**的整片清空——它会连这条身份快照一起抹掉，外部表现恰好是「怎么切都不动」，而 system 提示词那一侧看起来完全正常（这就是这个 bug 藏了这么久的原因）。
   - 想关这条通道用插件配置的 `identityReminder: false`（**不要**去改 `includeRuntimeContext`，那会连带关掉平台自己的运行时上下文）。
+- **「换过人了」是会话的事实，不是人设从哪一层解析出来的。** 初版把判据写成 `source === 'override'`（= 这个会话被外挂改过），**`/waifu-reset` 正好是它的反例**：回到挂载人设走的是 `mounted` 那一层，于是这一轮前缀、后缀、运行时快照**全部沉默**。实测 `session-a367789b`（2026-10-14 13:42）：`/waifu-reset` 把 system 节点**正确**重写成 达克妮斯，快照却悄悄丢掉了身份那一段，模型下一轮照样用 照桥心美 的口气回答（它自己的推理写着 `Komi would react with shock`）——锚是它自己的历史。现在的判据是**服务过的人设变了**：`noteServed()` 在 `resolvePersonaText` 里记账（`servedIds` 存上一轮服务的是谁），变了就写一条 `lastSwitch` 备忘（`{ id, previousId, previousName }`），`switchOf()` 按「正在服务的这一位是不是那条备忘指的人」读回来。`reAnchored()` = `source === 'override' || switchOf(...) !== null`，**前缀与快照用同一个判据**，所以 reset 这一轮也会被点名，之后的轮次保持同一段文本（平台只提交**变过**的快照，所以不会每轮重发）。
+  - 记账必须放在 `resolvePersonaText` 里，因为**装配顺序是确定的**：`.ref/system-prompt.js:315` 先跑 `variables[name] = provider(context)`，`:348` 才跑 context 文本——人设文本永远先于身份快照被求值，所以同一次 `assemble()` 里两者读到的是同一份簿记。`assemble()` 每个 step 只跑一次（`agent-loop.js` `preStep`）。
+  - 有意的副作用：会话换过人之后，服务文本会**一直**带着 `【人设已切换】`（旧版对 override 就是这样，reset 现在也一致），好处是文本逐轮不变，`project()` 只在换人那一次重写提示词。
+  - **已知边界**：`servedIds` / `lastSwitch` 是进程内内存，重启 DSH 后第一次装配不知道会话之前服务过谁，**那一轮不发新快照**。但上一次换人时发的那条快照是**普通 USER 消息、已经落在会话历史里**，模型照样看得到——真正的缺口只有「换人发生在安装这个修复之前的旧版本里」这种历史遗留，以及同一个进程内从未被本插件装配过的会话。
 
 ## op 一览
 
@@ -102,7 +106,7 @@ updateCheck  updateApply  updateProgress  purge
 ## 测试与 CI
 
 ```bash
-pnpm test          # = node selftest.mjs，313 条断言，离线、不碰 profile、不联网
+pnpm test          # = node selftest.mjs，317 条断言，离线、不碰 profile、不联网
 pnpm pack          # 先看产物清单
 pnpm publish --no-git-checks 
 ```
@@ -135,7 +139,7 @@ CI 在 `.github/workflows/test.yml`：push 到 `main`、开 PR、或手动触发
 15. **同一条会话里换人再问一句** → 口吻必须真的变了（这是整件事唯一的真证明）；再打 `/waifu-current` → **只有一行**，且指明当前是谁。**接着连切三次不同的名字** → 每一次口吻都要跟着走（「切了但一直是同一个」是这套设计的头号失效模式）。再切**同一个人** → 必须回「本来就是 X · 没有改动」，不能回「已切换」。顺手确认旁路通道：换人之后每一轮的请求**尾部**应多出一条**用户角色**的「本轮身份 · 运行时确认」，没换过的会话不该有这条（有它 = `includeRuntimeContext` 没被改坏）。
 16. 打 `/waifu-change`（不带参数）→ 弹选择器，搜索能过滤、当前那位打勾；选一个 → 会话里出现一条「已切换」的记录。
 17. 先在「人设」工具条打开「拖拽排序」（关着的时候行内控件正常、拖动无效）→ 整行拖到另一行上 → 顺序变了；**开着的时候行内的展开 / 开关 / 导出 / 归档必须点不动**；关掉 DSH 再打开顺序还在；打开那个 `.md` 确认**正文没被动过**。
-18. `/waifu-reset` → 回落到这个会话原本挂载的那一篇。
+18. `/waifu-reset` → 回落到这个会话原本挂载的那一篇，**而且下一轮的口吻必须真的变回那一位** —— 这是本版修掉的一个真 bug（`session-a367789b`，2026-10-14 13:42）：reset 走 `mounted` 层，初版把「换过人了」判成 `source === 'override'`，于是前缀与运行时快照**双双沉默**，模型继续用刚被 reset 掉的那位回答。验收点两条：① 请求尾部那条「本轮身份 · 运行时确认」快照必须**点名**回落到的这一位，并带一句「（上一轮还是「X」）」；② 下一轮的回答确实是那一位。附带：换过人的会话此后每轮都带 `【人设已切换】` 前缀（**有意为之**，旧版对 override 就是这样），别当成 bug。**已知没修**：重启 DSH 之后第一次装配不知道这个会话以前服务过谁，「重启 → 接着那个被 reset 的会话聊」这一轮没有快照可发。
 19. **开一个新任务（别发消息）→ 看顶部 preset 下拉**：四个内置模式（standard / ptc / minimal / cordis）必须在**最上面四行**，自定义人设全在下面。这是 `PERSONA_ORDER_BASE` 唯一的验收点。
 20. **默认开关连点**：把默认从 A 换到 B，再换到 C，**每换一次都留在面板里看**——高亮边框必须**当次**就落到新行上，不能还挂在旧行上等下次进来才自愈。然后开新任务，顶部下拉默认选中的必须是 C。
 21. 把默认指向一个**正在被编辑、暂时组装不出来**的人设 → 设置页「新会话默认用谁」下面必须出现「这个默认指不到任何可用的人设」。

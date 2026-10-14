@@ -537,9 +537,14 @@ const created = await call({ op: 'create', id: 'beta', name: 'Beta', order: 5, d
 check('create reports ok', created.ok === true, JSON.stringify(created));
 check('beta.md exists', fs.existsSync(path.join(tmp, 'beta.md')));
 check('beta registered', presets.has('beta'));
+// A session id is ONE ongoing conversation, so its mounted preset never moves,
+// and being served a different persona under the same id is a switch by
+// definition — including a switch back to the mounted one. These three
+// assertions are about the FILE and the registry, not about anchoring, so they
+// bring their own session rather than walking one id through four personas.
 check(
   'multi-line body survived the one-line JSON request',
-  resolved('beta') === 'Beta body.\nSecond line.',
+  resolvedFor('sess-create', 'beta') === 'Beta body.\nSecond line.',
 );
 
 const badId = await call({ op: 'create', id: '../evil', body: 'x' });
@@ -561,7 +566,7 @@ check(
   !fs.existsSync(path.join(tmp, 'beta.md')) && fs.existsSync(path.join(tmp, 'beta-2.md')),
 );
 check('the new id is registered, the old one is not', presets.has('beta-2') && !presets.has('beta'));
-check('update re-registered with the new body', resolved('beta-2') === 'Beta body v2.');
+check('update re-registered with the new body', resolvedFor('sess-update', 'beta-2') === 'Beta body v2.');
 check('update rewrote the display name', presets.get('beta-2')?.name === 'Beta 2');
 const sameName = await call({ op: 'update', id: 'beta-2', name: 'Beta 2', description: 'touched' });
 check(
@@ -1427,9 +1432,9 @@ check('the stored file keeps only her own part', framedFile.includes('她的性�
 check('and records which skeleton she uses', framedFile.includes('template: _common.md'), JSON.stringify(framedFile.split('\n').slice(0, 8)));
 check(
   'the registered prefix is the ASSEMBLED text',
-  resolved('framed') ===
+  resolvedFor('sess-framed', 'framed') ===
     '# Framed 的框架\n\n开头：你是「Framed」。\n\n她的性格段落。\n\n【通用条款】\n- 不许机械复读。\n',
-  JSON.stringify(resolved('framed')),
+  JSON.stringify(resolvedFor('sess-framed', 'framed')),
 );
 const framedGet = await call({ op: 'get', id: 'framed' });
 check(
@@ -1765,13 +1770,49 @@ check('the global default is only the third rung', resolvedFor('fresh-session', 
 const cleared = await call({ op: 'waifuClear', sessionId: 'stub-session' });
 check('waifuClear drops the override', cleared.ok === true && cleared.had === 'ov-two', JSON.stringify(cleared));
 check('and the mounted persona takes over again', resolved('ov-one').includes('第一个覆盖用的正文。'));
-// Clearing the override has to clear the snapshot too. The loop turns an empty
-// snapshot into its own 「earlier runtime-context snapshots no longer apply」
-// message, so a stale identity here would outlive the switch it described.
+/*
+ * A reset is a SWITCH, and it has to be treated as one.
+ *
+ * The first version of this feature keyed re-anchoring on `source === 'override'`
+ * — "this session was moved" — which is false on the way BACK: `/waifu-reset`
+ * resolves through the `mounted` rung, so both the notice and the runtime
+ * snapshot went silent on the one turn the model had a competing voice to drop.
+ * Measured in `session-a367789b`: the system node was rewritten to 达克妮斯
+ * correctly and the model answered as 照桥心美 anyway (its own reasoning read
+ * 「Komi would react with shock」), because its earlier turns were the anchor.
+ * The old assertion here —「resetting a session retires its identity snapshot」 —
+ * encoded that mistake: retiring the identity from a conversation that is still
+ * full of the persona being replaced is exactly how the model keeps answering as
+ * her.
+ *
+ * So: the snapshot must NAME the persona the session just came back to, and keep
+ * saying it on later turns (same text, so the loop commits it once).
+ */
+const resetSnapshot = identityFor('stub-session', 'ov-one');
 check(
-  'resetting a session retires its identity snapshot',
-  identityFor('stub-session', 'ov-one') === '',
+  'resetting a session re-anchors it with a snapshot naming the mounted persona',
+  resetSnapshot.includes('「OvOne」') && resetSnapshot.includes('运行时确认'),
+  JSON.stringify(resetSnapshot),
+);
+check(
+  'and the snapshot says which persona it is replacing',
+  resetSnapshot.includes('「OvTwo」'),
+  JSON.stringify(resetSnapshot),
+);
+check(
+  'the snapshot is stable, so the loop commits it once instead of every step',
+  identityFor('stub-session', 'ov-one') === resetSnapshot && resetSnapshot !== '',
   JSON.stringify(identityFor('stub-session', 'ov-one')),
+);
+check(
+  'and the served prompt carries the switch notice too',
+  resolved('ov-one').includes('【人设已切换】') && resolved('ov-one').includes('「OvTwo」'),
+  JSON.stringify(resolved('ov-one').slice(0, 200)),
+);
+check(
+  'the notice is not re-added on the next assembly',
+  (resolved('ov-one').match(/【人设已切换】/g) ?? []).length === 1,
+  JSON.stringify((resolved('ov-one').match(/【人设已切换】/g) ?? []).length),
 );
 
 const textBefore = resolved('ov-one');
