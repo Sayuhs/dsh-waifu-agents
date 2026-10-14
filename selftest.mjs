@@ -1913,6 +1913,148 @@ console.log('--- the session chip follows a switch ---');
   );
 }
 
+console.log('--- a reset comes back to the session OWN preset, not the last one switched to ---');
+/*
+ * Measured in `session-00777175` (2026-10-14 14:23). That session was stamped
+ * 达克妮斯 at creation — the global default then — then re-picked as 惠惠 on the
+ * new-task screen, which is an `agent-preset/selected` event and therefore what
+ * the chip renders, and served its first turn as 惠惠. `/waifu-change 达克妮斯`
+ * followed by `/waifu-reset` then landed back on 达克妮斯.
+ *
+ * Nothing read the session wrong: the plugin had moved the chip onto the
+ * override itself (`rememberSessionPreset`, so the label stops naming a wife the
+ * session no longer talks as) and the reset read that chip back as "what this
+ * session mounts". A session has three candidate answers and they disagree the
+ * moment it was re-picked:
+ *
+ *     header (born with it) | projection before the switch (its own) | the override
+ *
+ * Only the middle one is the session's own, and after the write it is gone — so
+ * `setOverride` records it. This is the case a header read cannot express, and
+ * the reason the assertion cannot simply reuse the fixtures above.
+ */
+{
+  const projection = new Map([['home-session', 'ov-two']]);
+  services = {
+    sessionProjections: {
+      stateOf: (session, key) =>
+        key === 'agentPreset' ? projection.get(session.id) ?? null : undefined,
+    },
+  };
+  const appended = [];
+  const session = {
+    id: 'home-session',
+    // What it was BORN with — deliberately not what it is running as.
+    header: { agentPreset: 'ov-one' },
+    append: (type, data) => {
+      appended.push({ type, data });
+      if (type === 'agent-preset/selected') projection.set(session.id, data?.agentPreset);
+    },
+  };
+  const agent = { session };
+  const switched = await commands.get('waifu-change').handler({ agent, rawInput: 'ov-one' });
+  check(
+    'the switch knows which persona the session ran as before it, born-with is not good enough',
+    switched.kind === 'success' && projection.get('home-session') === 'ov-one',
+    JSON.stringify({ switched, projection: projection.get('home-session') }),
+  );
+  appended.length = 0;
+  const back = await commands.get('waifu-reset').handler({ agent });
+  check(
+    'so the reset returns to that persona, not to the last one switched to',
+    back.kind === 'success' &&
+      appended.length === 1 &&
+      appended[0].data?.agentPreset === 'ov-two' &&
+      projection.get('home-session') === 'ov-two',
+    JSON.stringify({ back, appended, projection: projection.get('home-session') }),
+  );
+  check(
+    'and the next turn is served as her, so the label and the prompt agree',
+    String(variables.get('waifu_persona')?.({ agent }) ?? '').includes('第二个覆盖用的正文。'),
+    JSON.stringify(String(variables.get('waifu_persona')?.({ agent }) ?? '').slice(0, 120)),
+  );
+  /*
+   * A switch that is never undone must not re-read the chip either: the second
+   * answer would be the first override, so the session would come home to a wife
+   * it was merely passing through.
+   */
+  await commands.get('waifu-change').handler({ agent, rawInput: 'ov-two' });
+  appended.length = 0;
+  const again = await commands.get('waifu-reset').handler({ agent });
+  check(
+    'a second switch keeps the first answer, so reset still comes home',
+    again.kind === 'success' &&
+      appended.length === 1 &&
+      appended[0].data?.agentPreset === 'ov-two',
+    JSON.stringify({ again, appended }),
+  );
+  /*
+   * The chip is the persisted half of the reset: a session resumes as what its
+   * projection names, so a chip left on the dropped override brings her back.
+   * When the append does not take, the answer must say the move did not stick
+   * rather than report success — the failure would otherwise resurface as
+   * 「重启之后怎么又是她」, with nothing on screen to explain it.
+   */
+  projection.set('flaky-session', 'ov-two');
+  let writes = 0;
+  const flaky = {
+    id: 'flaky-session',
+    header: { agentPreset: 'ov-two' },
+    append: (type, data) => {
+      if (++writes > 1) throw new Error('agent-preset/locked');
+      if (type === 'agent-preset/selected') projection.set('flaky-session', data?.agentPreset);
+    },
+  };
+  await commands.get('waifu-change').handler({ agent: { session: flaky }, rawInput: 'ov-one' });
+  const refusedReset = await commands.get('waifu-reset').handler({ agent: { session: flaky } });
+  check(
+    'a chip that refused to move back is reported, not papered over',
+    refusedReset.kind === 'success' &&
+      refusedReset.text.includes('标签没跟上') &&
+      projection.get('flaky-session') === 'ov-one',
+    JSON.stringify(refusedReset),
+  );
+  services = {};
+}
+
+/*
+ * The panel drives the same pair through the HTTP route, and it is the way most
+ * switches actually happen — so the answer has to be recorded there too, not only
+ * in the command. The route reaches the live agent through the `agents` service,
+ * which is the one thing the command path gets handed for free.
+ */
+{
+  const projection = new Map([['panel-session', 'ov-two']]);
+  const appended = [];
+  const session = {
+    id: 'panel-session',
+    header: { agentPreset: 'ov-one' },
+    append: (type, data) => {
+      appended.push({ type, data });
+      if (type === 'agent-preset/selected') projection.set(session.id, data?.agentPreset);
+    },
+  };
+  services = {
+    sessionProjections: {
+      stateOf: (one, key) =>
+        key === 'agentPreset' ? projection.get(one.id) ?? null : undefined,
+    },
+    agents: { list: () => [{ id: 'panel-session', session }] },
+  };
+  const applied = await call({ op: 'waifuApply', sessionId: 'panel-session', personaId: 'OvOne' });
+  appended.length = 0;
+  const cleared = await call({ op: 'waifuClear', sessionId: 'panel-session' });
+  check(
+    'the panel comes home the same way the command does',
+    applied.ok === true &&
+      cleared.ok === true &&
+      appended.length === 1 &&
+      appended[0].data?.agentPreset === 'ov-two',
+    JSON.stringify({ applied, cleared, appended }),
+  );
+  services = {};
+}
+
 console.log('--- drag to reorder ---');
 check('reorderIds moves one id in front of another', reorderIds(['a', 'b', 'c'], 'c', 'a').join(',') === 'c,a,b');
 check('and moving it backwards works the same way', reorderIds(['a', 'b', 'c'], 'a', 'c').join(',') === 'b,a,c');

@@ -876,7 +876,14 @@ export function apply(ctx, config = {}) {
         for (const [sessionId, value] of Object.entries(stored)) {
           const personaId = oneLine(value?.personaId);
           if (sessionId !== "" && personaId !== "")
-            rows[sessionId] = { personaId, at: Number(value?.at) || 0 };
+            rows[sessionId] = {
+              personaId,
+              at: Number(value?.at) || 0,
+              // The preset this session runs with NO override, captured when the
+              // override was first laid down. Empty on a record written before
+              // this field existed — those fall back to the header.
+              resting: oneLine(value?.resting),
+            };
         }
       }
     } catch {
@@ -913,12 +920,55 @@ export function apply(ctx, config = {}) {
     return hit === undefined ? null : hit.personaId;
   }
 
-  /** Point one session at one persona, or — with `null` — clear it. */
-  function setOverride(sessionId, personaId) {
+  /**
+   * The preset this session runs with NO override, or `""` when nothing
+   * recorded it.
+   *
+   * Read by `/waifu-reset`, which is the one caller that has to know where the
+   * session came from. See {@link setOverride} for why it cannot be read off
+   * the session at reset time.
+   * @param {string} sessionId
+   * @returns {string} the recorded id, or `""`
+   */
+  function restingOf(sessionId) {
+    if (typeof sessionId !== "string" || sessionId === "") return "";
+    const hit = readOverrides()[sessionId];
+    return hit === undefined ? "" : oneLine(hit.resting);
+  }
+
+  /**
+   * Point one session at one persona, or — with `null` — clear it.
+   *
+   * `ownPreset` is what the session would run as with no override at all, read
+   * BEFORE this write. It is recorded for the FIRST override only, because that
+   * is the last moment the answer is still the session's own: every later switch
+   * runs after this plugin has already moved the session's chip
+   * ({@link rememberSessionPreset}) onto the previous override, so reading the
+   * chip then would only read back the plugin's own last answer — which is
+   * exactly the 「/waifu-reset 回到上一个换过的人」 bug this field exists to
+   * kill. A session that was re-picked on the new-task screen makes the point:
+   * its header still names the preset it was BORN with while its chip names the
+   * pick, and `/waifu-reset` owes the pick.
+   * @param {string} sessionId
+   * @param {string | null} personaId the override, or `null` to clear it
+   * @param {string} [ownPreset] the session's own preset, read before this write
+   * @returns {boolean} whether the record was written
+   */
+  function setOverride(sessionId, personaId, ownPreset) {
     if (typeof sessionId !== "string" || sessionId === "") return false;
     const rows = readOverrides();
     if (personaId === null || oneLine(personaId) === "") delete rows[sessionId];
-    else rows[sessionId] = { personaId: oneLine(personaId), at: Date.now() };
+    else {
+      const previous = rows[sessionId];
+      const resting =
+        oneLine(previous?.resting) ||
+        (previous === undefined ? oneLine(ownPreset) : "");
+      rows[sessionId] = {
+        personaId: oneLine(personaId),
+        at: Date.now(),
+        ...(resting === "" ? {} : { resting }),
+      };
+    }
     writeOverrides();
     return true;
   }
@@ -1465,24 +1515,36 @@ export function apply(ctx, config = {}) {
 
   /**
    * Put the label back on what this session resolves to with no override: the
-   * preset it was mounted with, else the global default.
+   * preset it runs with on its own, else the global default.
    *
    * `/waifu-reset` used to leave the chip naming the wife that had just been
    * dropped, which is the same lie in the other direction.
    *
+   * Three answers exist for "the session's own preset", and they disagree as
+   * soon as the session was re-picked on the new-task screen:
+   *
+   *   - what the override record remembered (`ownPreset`, see `setOverride`) —
+   *     the only correct one, because the plugin's own chip-sync has since moved
+   *     the projection onto the override;
+   *   - the header, which names the preset the session was BORN with;
+   *   - the plugin's global default, when neither of the above is usable.
+   *
    * @param {unknown} agent the live agent owning the session
+   * @param {string} [ownPreset] the remembered own preset, best answer first
    * @returns {boolean} whether the label was moved
    */
-  function restoreSessionPreset(agent) {
+  function restoreSessionPreset(agent, ownPreset) {
     if (config.syncSessionChip === false) return false;
     const session = agent?.session;
     if (session === undefined || session === null) return false;
+    const remembered = oneLine(ownPreset);
     const mounted = oneLine(session.header?.agentPreset);
-    // A mounted id is whatever the session already had, so it is safe by
-    // construction. The default is only usable when it is one of ours.
-    const resting = mounted !== "" ? mounted : oneLine(cachedDefault.id);
+    // A remembered or mounted id is whatever the session already had, so it is
+    // safe by construction. The default is only usable when it is one of ours.
+    const resting =
+      remembered !== "" ? remembered : mounted !== "" ? mounted : oneLine(cachedDefault.id);
     if (resting === "") return false;
-    if (mounted === "" && !owned.has(resting)) return false;
+    if (remembered === "" && mounted === "" && !owned.has(resting)) return false;
     try {
       session.append("agent-preset/selected", { agentPreset: resting });
       return true;
@@ -3919,11 +3981,14 @@ export function apply(ctx, config = {}) {
         error: `「${matched.id}」现在组装不出来（少了 [[body]]、或正文里混进了非法的 {{…}}），没有替换。`,
       };
     }
-    setOverride(sessionId, matched.id);
+    // Both reads happen before the override is laid down: the chip still names
+    // the session's own preset here, and this is the last moment it does.
+    const live = liveAgentFor(sessionId);
+    setOverride(sessionId, matched.id, anchorOf(live));
     // Same move as the command path: the persona is the override, the chip is
     // this event, and without it the label names whoever the session was born
     // with (see `rememberSessionPreset`).
-    rememberSessionPreset(liveAgentFor(sessionId), matched.id);
+    rememberSessionPreset(live, matched.id);
     return { ok: true, id: matched.id, name: found.name };
   }
 
@@ -3935,8 +4000,10 @@ export function apply(ctx, config = {}) {
         error: "这个操作要知道是哪个会话，但没拿到 session id。",
       };
     const had = overrideOf(sessionId);
+    // Read before the clear: clearing is what drops the record that holds it.
+    const resting = restingOf(sessionId);
     setOverride(sessionId, null);
-    restoreSessionPreset(liveAgentFor(sessionId));
+    restoreSessionPreset(liveAgentFor(sessionId), resting);
     await refreshDefault();
     return { ok: true, had, defaultId: cachedDefault.id };
   }
@@ -4243,7 +4310,7 @@ export function apply(ctx, config = {}) {
         };
       }
       const already = overrideOf(sessionId);
-      setOverride(sessionId, matched.id);
+      setOverride(sessionId, matched.id, mountedOf(agent));
       // The override is what the model is told; this is what the row above the
       // conversation shows. Without it a running session keeps the label of the
       // wife it was born with (see `rememberSessionPreset`).
@@ -4316,6 +4383,12 @@ export function apply(ctx, config = {}) {
           `（会话挂载的「${mountedId}」已经不可用，所以回落到了全局默认。换人：/waifu-change 名字）`,
         );
       }
+      // Where `/waifu-reset` would land, which is not the mounted id once this
+      // session has been switched: the chip names the override by then.
+      const home = restingOf(sessionId);
+      if (override !== null && home !== "" && home !== found.id) {
+        lines.push(`（清掉覆盖会回到「${home}」：/waifu-reset）`);
+      }
       return { kind: "success", text: lines.join("\n") };
     },
   });
@@ -4323,16 +4396,21 @@ export function apply(ctx, config = {}) {
   ctx.commands.register({
     name: "waifu-reset",
     description:
-      "清掉这个会话的人设覆盖，回到它原本挂载的那一篇（那一篇没了就回落全局默认）。",
+      "清掉这个会话的人设覆盖，回到这个会话自己的人设——也就是换人之前它在跑的那位（没记录就回到它出生时挂的那位，再不行回落全局默认）。",
     handler: async ({ agent }) => {
       const sessionId = sidOf(agent);
       if (sessionId === "")
         return { kind: "error", text: "这个命令只能在会话里用。" };
       const had = overrideOf(sessionId);
+      // Read before the clear: clearing is what drops the record that holds it.
+      // Without it the chip — which this plugin moved onto the override — is the
+      // only thing left to read, and the session comes back as the LAST wife it
+      // was switched to instead of the one it started this conversation as.
+      const home = restingOf(sessionId);
       setOverride(sessionId, null);
       // Put the label back where the persona went: the chip has to stop naming a
       // wife this session no longer talks as.
-      restoreSessionPreset(agent);
+      restoreSessionPreset(agent, home);
       await refreshDefault();
       if (had === null)
         return {
@@ -4340,15 +4418,27 @@ export function apply(ctx, config = {}) {
           text: "这个会话本来就没有覆盖，什么都没改。",
         };
       dropShadow(sessionId);
-      const mountedId = mountedOf(agent);
+      const mountedId = home !== "" ? home : mountedOf(agent);
       const found = sessionPersona(sessionId, mountedId);
       const where =
         found.id === null
           ? "这个会话现在没有可用的人设"
           : `回到 ${found.name}（${SOURCE_LABEL[found.source] ?? found.source}）`;
+      /*
+       * The chip is the persisted half of this: a session is re-mounted from
+       * what its projection names, so leaving it on the dropped override would
+       * bring her back on the next resume. If the append did not take (chip sync
+       * off, or the platform refused it), say so instead of reporting the move
+       * as done — the failure would otherwise resurface as 「重启后怎么又是她」.
+       */
+      const chip = mountedOf(agent);
+      const drift =
+        home !== "" && chip !== "" && chip !== home
+          ? `\n（会话标签没跟上：现在还写着「${chip}」，重启这个会话可能又变回她）`
+          : "";
       return {
         kind: "success",
-        text: `已清掉覆盖（之前是「${had}」）· ${where} · 从下一轮开始生效`,
+        text: `已清掉覆盖（之前是「${had}」）· ${where} · 从下一轮开始生效${drift}`,
       };
     },
   });
