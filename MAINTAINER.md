@@ -66,7 +66,20 @@ updateCheck  updateApply  updateProgress  purge
 - **原子写**：`writeAtomic()` = 临时文件 + `rename`，覆盖前留 `<name>.bak`。
 - **缓存**：`(mtimeMs, size)` 键；`chars` 是「去掉 front matter 并 trim 之后的 JS 字符串长度」，和字节数没有稳定换算。
 - **`list` 不带绝对路径**：它给 `id / idOk / name / order / description / group / template / chars / charsFull / problems / owned / mtimeMs / size`。
-- **`roster` 多带一个 `defaultResolves`（三态）**：`null` = 没有任何面报出默认值，**不知道**；否则 = `presets.some(r => r.id === defaultId)`。平台的新任务页 chip 是 `presets.find(p => p.isDefault)?.id ?? presets[0].id`（`ui-agent-preset`），所以默认指不到人时它会**静默**起在第一行——那个旗标是唯一能把这件事说出口的地方。`null` 不能压成 `false`：那会冤枉一个单纯什么都没设的 profile。客户端的 `defaultResolves` state 同样是三态，设置页只在 `=== false` 时报警。
+- **`roster` 多带一个 `defaultResolves`（三态）**：`null` = 没有任何面报出默认值，**不知道**；否则 = `presets.some(r => r.id === defaultId)`。`null` 不能压成 `false`：那会冤枉一个单纯什么都没设的 profile。客户端的 `defaultResolves` state 同样是三态，设置页只在 `=== false` 时报警。
+  ⚠️ **这条旗标曾经把后果写反过，别照着旧注释改回去。** 旧文案（注释和 `defaultUnresolved` 都是）说「默认指不到人 → 新会话悄悄落到列表第一项」，依据是 composer 的 `fallback = presets.find(p => p.isDefault)?.id ?? presets[0]?.id`（`ui-agent-preset.js:1263`）。那是**渲染层**的兜底，永远轮不到它跑：服务层先解析，`retain(id)` 直接抛
+  ```js
+  // registry.js:494 —— 默认就是 selectedDefault ?? config.default
+  get defaultId() { return this.config.selectedDefault.get() ?? this.config.default; }
+  // registry.js:643（resolve / readDocument 同样）
+  throw new RemoteError("agent-preset/not-found", `Unknown agent preset: ${wanted}`, { agentPreset: wanted, available: [...] });
+  ```
+  所以真实后果是**每一个新会话都被拒绝**（用户看到的那条 `新建会话失败：agent-preset/not-found: Unknown agent preset: 照桥心美`），不是静默回落到第一行。写这条断言时别用「回落」这个词——它会把一个 `P0` 级故障描述成显示问题。
+- **悬空的默认是自愈的，不是只报告。** `reconcileDefault()` 在三个地方跑：`status()`（op `list`，也就是**打开面板就修**）、`remove()`（退掉的人设正好是默认那位）、以及启动时 `scan()` 之后的 `.then()`。判定是「`selectedDefault` 有值，但 `agentPresets.list()` 里没有这个 id」；动作只有**清掉**（`moveDefaultOff`），**绝不替用户改指到另一个妻子**——清空会回落到 profile 的 `default`，替用户选人则是另一件更响的事。两个必须保留的细节：
+  - **名册为空时不动**（`rows.length === 0` → 「名册还是空的，先不动」）。别的插件在**它自己的** `apply` 里注册 preset，本行完全可能先被激活；此时读名册会把自己还没注册的 id 判成悬空。这正是启动那一跳要 `.then()` 挂在 `scan()` **之后**的原因——先让本插件自己的人设进名册。空名册守卫是同一件事的兜底。
+  - **`moveDefaultOff` 是两步，和 `setDefault` 一样**：`writeDefault`/`verifyDefault` 走 `settings` 服务并**重读确认**，然后 `resettleUnstarted` 把还挂在那个死 id 上、没开口的会话挪走。只清字段的话，屏上那个空会话的 header 还钉着死 id，chip 照样是坏的，建会话照样失败。
+  - 修复失败**必须出声**：`status()` 回传 `defaultHeal: { ok: false, from, reason }`，面板用 `defaultHealFailed` 显示（此时新会话仍然起不来，是唯一不能静默的一条）。成功回传 `{ ok: true, from, nowDefault, moved }`。`remove()` 回传 `defaultFollowed: 'cleared' | 'unchanged' | 'failed'`。
+- **`remove()` 现在是第二个会改默认的写路径**（第一个是 `rename()` 的 `repointDefault`）。退掉的正好是默认那位时，不清默认就留下一个悬空 id，等于「删人设 = 下次新会话失败」。爆炸半径同样压住：退的不是默认那位时**一个字节都不写**（断言 `defaultFollowed === 'unchanged'`）。
 - **非法 id 不进选择器**：`choosableRows()` 只收 `problems` 为空且 `idOk` 为真的行。
 - **条件样式必须把键写进基础样式，不能让 React 去"移除"。** 这一条看着像代码风格，其实是面板高亮的生死线。React 丢弃一个不再收到的样式属性时写的是 `style[name] = ''`；对普通属性这没问题（开关的 `transform` 就是这么被清掉的，实测正常），但对**简写里的属性不行**：清掉 `borderColor` 之后，`border: 1px solid …` 会把颜色重新应用一遍，而"颜色被清掉"的边框会回落到 `currentColor`。本主题下 `currentColor`（`--dsw-alias-label-primary`）和品牌色（`--dsw-alias-brand-primary` = `neutral-bluish-50`）是同一个近白，于是**一个已经不是默认的行看起来仍然选中**，只有重挂载才会好。这正是用户报的「多次切换默认人设后，选中过的 border 样式存在残留，再次进入就消失了」——而且只发生在**点过的**那些行上（点过才有机会被设过品牌色），没点过的行用的是显式的 `border-l1`。所以 `L.item` 里同时写明 `border` 和 `borderColor`/`borderStyle`，`L.switch` 写明 `borderColor`，`L.thumb` 写明 `transform: 'translateX(0)'`。自测里有一条按**键集合**遍历所有 `条件变体/基础` 配对的断言，加新的条件样式时它会替你拦住。
 - **会话顶部那个 chip 不是我们的，是 `projectionValues.agentPreset`。** 它由**唯一一种事件**推进：`agent-preset/selected`（`registry.js` 的 `apply` 只认这个），而写它的只有平台的 `select()`。`select()` 对**已开过轮**的会话会抛 `agent-preset/locked` —— 因为"真的换"意味着重挂载整套 preset、连工具一起换。所以 `/waifu-change` 追加**事件本身**：只动标签，不动正在跑的树；人设本来就有 override 在供，标签和模型听到的因此终于一致。两条硬约束：① 只能写**已注册**的 preset id（值会被持久化，恢复会话时按它挂载，写一个没人提供的 id 会让下次恢复失败）；② 插件配置的 `syncSessionChip: false` 可以整条关掉（关的理由是这条通道同时决定恢复时挂载谁）。`/waifu-reset` 对应地把标签挪回"会话挂载的那一位，没有就回落到全局默认"。
@@ -89,7 +102,7 @@ updateCheck  updateApply  updateProgress  purge
 ## 测试与 CI
 
 ```bash
-pnpm test          # = node selftest.mjs，296 条断言，离线、不碰 profile、不联网
+pnpm test          # = node selftest.mjs，313 条断言，离线、不碰 profile、不联网
 pnpm pack          # 先看产物清单
 pnpm publish --no-git-checks 
 ```
@@ -125,7 +138,8 @@ CI 在 `.github/workflows/test.yml`：push 到 `main`、开 PR、或手动触发
 18. `/waifu-reset` → 回落到这个会话原本挂载的那一篇。
 19. **开一个新任务（别发消息）→ 看顶部 preset 下拉**：四个内置模式（standard / ptc / minimal / cordis）必须在**最上面四行**，自定义人设全在下面。这是 `PERSONA_ORDER_BASE` 唯一的验收点。
 20. **默认开关连点**：把默认从 A 换到 B，再换到 C，**每换一次都留在面板里看**——高亮边框必须**当次**就落到新行上，不能还挂在旧行上等下次进来才自愈。然后开新任务，顶部下拉默认选中的必须是 C。
-21. 把默认指向一个**正在被编辑、暂时组装不出来**的人设 → 设置页「新会话默认用谁」下面必须出现「这个默认指不到任何可用的人设」，而不是安安静静地回落。
+21. 把默认指向一个**正在被编辑、暂时组装不出来**的人设 → 设置页「新会话默认用谁」下面必须出现「这个默认指不到任何可用的人设」。
 22. **改默认不该需要重启**：在插件面板把默认从 A 换成 B → **立刻**开一个新任务（别发消息）→ 顶部选择器默认选中的必须是 B。这是「写入有没有通知平台」唯一的验收点（`settings/document-updated`）；走 `configEditor.edit()` 的旧路径这里会显示 A。
 23. **切完看会话顶上那个标签**：在同一个会话里 `/waifu-change` 到另一位 → 会话标题旁边的标签必须**跟着变**。它不动就是 `agent-preset/selected` 没追加成功；把它写成 `syncSessionChip: false` 时标签**应该**保持不动。
 24. **改默认要连"当前这个空会话"一起换**：让新任务页停在屏幕上别动 → 在插件面板把默认从 A 换成 B → **不要新建会话**，回来看新任务页顶上的选择器，必须已经变成 B。这一条和第 22 条**不是同一件事**：第 22 条考的是"之后新建的会话拿谁"（`selectedDefault`），这条考的是"已经摆在屏幕上的那个空会话"（`projectionValues.agentPreset`）。只修了第 22 条的版本，这里会停在 A——而且 Agent 预设页的「新任务默认」徽章**已经是 B**，两处对不上就是它。
+25. **删掉人设文件 / 退掉默认那位，然后重启** —— 这是「悬空默认」的现场复现，也是这一版修复的验收点：① 把默认指向 A，**关掉 DSH**，把 `~/.dsh/personas/A.md` 从磁盘删掉（不走面板），重开 DSH → 新任务必须能正常建起来，**不能**出现 `agent-preset/not-found`；② 日志里应有一条 `WARN dsh-waifu-agents: 默认人设「A」已经不在名册里了…已清掉这条默认`；③ 打开插件面板 → 「新会话默认用谁」那行下面出现一条「已自动清掉」的说明（`defaultHealed*`），刷新一次面板后它消失；④ 面板里把默认设成 B → 在**面板里**退掉 B（归档）→ 默认必须跟着清掉，`~/.dsh/personas` 里出现 `B.md.off`，且下一次新任务不再失败。只有清了字段、没把屏上那个空会话一起挪走的版本，会在 ① 那里照样失败。

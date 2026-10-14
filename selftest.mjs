@@ -869,6 +869,193 @@ check(
 services = {};
 defaultId = null;
 
+console.log('--- a default that names a persona nothing registers ---');
+/*
+ * `selectedDefault` is resolved at session creation, and the SERVICE is the one
+ * that refuses:
+ *
+ *     get defaultId() { return this.config.selectedDefault.get() ?? this.config.default }
+ *     // registry.js:494, feeding retain(id)
+ *     throw new RemoteError("agent-preset/not-found", `Unknown agent preset: ${wanted}`, …)
+ *     // registry.js:643
+ *
+ * so a persona deleted off disk while she was the default does not degrade to the
+ * first row: it blocks EVERY new session, and the panel is not where the user
+ * would think to look. That is 「删掉人设后新开对话直接失败：agent-preset/not-found」.
+ *
+ * Note the sequence — `roster` is read FIRST because it only reports, while
+ * `status` (op: list) is the repair point. Asserting the report after the repair
+ * would assert nothing.
+ */
+const writesBeforeHeal = writes.length;
+const healServices = {
+  settings: {
+    describe: () => [
+      {
+        ns: 'agent-preset-registry',
+        value: { selectedDefault: defaultId ?? '' },
+        revision: writes.length + 1,
+      },
+    ],
+    update: async (ns, patch) => {
+      writes.push({ op: 'update', ns, patch });
+      defaultId = patch.selectedDefault;
+    },
+    mutate: async (ns, ops) => {
+      writes.push({ op: 'mutate', ns, ops });
+      defaultId = null;
+    },
+  },
+  configEditor: {
+    entries: () => [
+      {
+        options: {
+          id: 'agent-preset-registry',
+          name: '@deepseek-ai/dsh-agent-preset-registry',
+        },
+      },
+    ],
+    edit: async () => {
+      throw new Error('configEditor.edit must not be the first choice any more');
+    },
+  },
+};
+services = healServices;
+defaultId = 'ghost-wife';
+check('the ghost really is not registered', !presets.has('ghost-wife'));
+const ghostRoster = await call({ op: 'roster' });
+check(
+  'the roster reports a default that names nothing as not resolving',
+  ghostRoster.defaultResolves === false,
+  JSON.stringify(ghostRoster.defaultResolves),
+);
+check(
+  'and no row is wearing the default badge',
+  ghostRoster.presets.every((row) => row.isDefault !== true),
+  JSON.stringify(ghostRoster.presets.filter((row) => row.isDefault === true)),
+);
+const healedPanel = await call({ op: 'list' });
+check(
+  'opening the panel clears it through settings.mutate',
+  writes.length === writesBeforeHeal + 1 &&
+    writes.at(-1)?.op === 'mutate' &&
+    writes.at(-1)?.ops?.[0]?.op === 'unset' &&
+    writes.at(-1)?.ops?.[0]?.path?.[0] === 'selectedDefault',
+  JSON.stringify(writes.slice(writesBeforeHeal)),
+);
+check(
+  'the repaired default is gone from the registry',
+  defaultId === null,
+  JSON.stringify(defaultId),
+);
+check(
+  'the panel is told what was repaired, and why',
+  healedPanel.defaultHeal?.ok === true &&
+    healedPanel.defaultHeal.from === 'ghost-wife',
+  JSON.stringify(healedPanel.defaultHeal),
+);
+/*
+ * `nowDefault` is the id a new session will actually be stamped with. On this
+ * stub the roster has no `config.default` to fall back on, so it is `null` and
+ * the report says 「回落到 profile 默认」; a real profile resolves `cordis` through
+ * the roster faces and names it instead. Both are the same field.
+ */
+check(
+  'and it names what new sessions will use instead',
+  healedPanel.defaultHeal.nowDefault === null ||
+    typeof healedPanel.defaultHeal.nowDefault === 'string',
+  JSON.stringify(healedPanel.defaultHeal.nowDefault),
+);
+const healedTwice = await call({ op: 'list' });
+check(
+  'a second open writes nothing more',
+  writes.length === writesBeforeHeal + 1,
+  String(writes.length),
+);
+check(
+  'and there is no repair left to report',
+  healedTwice.defaultHeal === null,
+  JSON.stringify(healedTwice.defaultHeal),
+);
+/*
+ * The other half of the contract: a default that DOES resolve must be left
+ * exactly where the user put it. A healer that clears a live default is worse
+ * than the bug it fixes.
+ */
+defaultId = 'alpha';
+const keptDefault = await call({ op: 'list' });
+check(
+  'a default that resolves is never touched',
+  writes.length === writesBeforeHeal + 1 && keptDefault.defaultId === 'alpha',
+  JSON.stringify({ writes: writes.length, id: keptDefault.defaultId }),
+);
+check('and nothing claims to have been repaired', keptDefault.defaultHeal === null);
+/*
+ * The degrade path has to be loud. Without a `configEditor` there is nothing to
+ * write through, and the panel has to say the default is still broken — staying
+ * quiet here is how the next new session fails with no explanation again.
+ */
+services = { settings: healServices.settings };
+defaultId = 'ghost-wife';
+const cannotHeal = await call({ op: 'list' });
+check(
+  'a profile that cannot write keeps the broken default and says so',
+  cannotHeal.defaultHeal?.ok === false &&
+    String(cannotHeal.defaultHeal.reason).includes('configEditor'),
+  JSON.stringify(cannotHeal.defaultHeal),
+);
+check(
+  'and it did not pretend to have written anything',
+  writes.length === writesBeforeHeal + 1 && defaultId === 'ghost-wife',
+  JSON.stringify({ writes: writes.length, defaultId }),
+);
+/*
+ * The other way this default goes dead: retiring her from the panel. `remove()`
+ * archives the file, so the preset leaves the roster — and if she was the
+ * default, the field is left naming nothing.
+ */
+services = healServices;
+const victim = await call({
+  op: 'create',
+  id: 'victim',
+  name: 'Victim',
+  body: 'Victim body.',
+});
+defaultId = 'victim';
+const removedDefault = await call({ op: 'remove', id: 'victim' });
+check(
+  'retiring the default persona clears the default with it',
+  removedDefault.defaultFollowed === 'cleared' &&
+    removedDefault.defaultCleared === true &&
+    defaultId === null,
+  JSON.stringify({ removedDefault, defaultId }),
+);
+check(
+  'and she is archived rather than deleted, as always',
+  fs.existsSync(path.join(tmp, 'victim.md.off')),
+);
+/*
+ * Blast radius: removing somebody else must not move the user's default. This is
+ * the assertion that keeps `remove()` from becoming a general-purpose healer.
+ */
+const bystander = await call({
+  op: 'create',
+  id: 'bystander',
+  name: 'Bystander',
+  body: 'Bystander body.',
+});
+defaultId = 'alpha';
+const removedBystander = await call({ op: 'remove', id: 'bystander' });
+check(
+  'retiring anyone else leaves the default where it is',
+  removedBystander.defaultFollowed === 'unchanged' &&
+    removedBystander.defaultCleared === undefined &&
+    defaultId === 'alpha',
+  JSON.stringify({ removedBystander, defaultId }),
+);
+services = {};
+defaultId = null;
+
 console.log('--- the session already on screen is re-seated, not just future ones ---');
 /*
  * Writing `selectedDefault` decides what a session created LATER is stamped
@@ -1944,6 +2131,21 @@ check(
 check(
   'the persona picker and the @ source are both wired',
   clientSource.includes('commandUi.decorate') && clientSource.includes('registerSource'),
+);
+/*
+ * The repair report has three outcomes and the panel has to be able to draw all
+ * three: cleared and falling back to the profile default, cleared onto a named
+ * persona, and NOT cleared (which leaves new sessions still refusing to open, so
+ * it is the one that must never be silent).
+ */
+check(
+  'the repair report can draw every outcome it can be handed',
+  clientSource.includes("t('defaultHealed')") &&
+    clientSource.includes("t('defaultHealedNobody')") &&
+    clientSource.includes("t('defaultHealedMoved')") &&
+    clientSource.includes("t('defaultHealFailed')") &&
+    clientSource.includes('data?.defaultHeal != null'),
+  'the default-repair notice is not wired',
 );
 check(
   'every icon the panel asks for is in the bridge table',

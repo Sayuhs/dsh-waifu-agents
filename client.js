@@ -174,7 +174,11 @@ window.__ModuleLoader__.load({
         defaultUnchecked: '写进去了，但这个 profile 读不回来确认（既没有 settings，名册里也没有 isDefault）。这一行没报错，可也没人能担保平台认它。',
         defaultReseated: '也把当前这个还没开口的会话换过去了——新任务页顶上现在就是她。',
         defaultViaEditor: '警告：这次没走 settings 服务，退回配置编辑器写的。磁盘上是对的，但平台收不到通知，新任务页可能不跟——看日志里那条 warn。',
-        defaultUnresolved: '这个默认指不到任何可用的人设——新会话会悄悄落到列表第一项。重新点一次开关，或者换一个。',
+        defaultUnresolved: '这个默认指不到任何可用的人设——新建会话会直接失败（agent-preset/not-found），不是悄悄回落。插件会把它清掉，让新会话回落到 profile 默认。',
+        defaultHealed: '默认「{from}」已经不在名册里了——留着它新建会话会被 agent-preset/not-found 直接挡掉。已自动清掉，新会话现在用「{to}」。',
+        defaultHealedNobody: '默认「{from}」已经不在名册里了——留着它新建会话会被 agent-preset/not-found 直接挡掉。已自动清掉，新会话回落到 profile 默认。',
+        defaultHealedMoved: ' 还没开口的会话也一起换过去了。',
+        defaultHealFailed: '默认「{from}」已经不在名册里了，新建会话会被 agent-preset/not-found 直接挡掉——但这次没能自动清掉：{reason}。去「设置 → Agent Presets」重新选一个。',
         diagnostics: '诊断',
         defaultReadFrom: '默认值读自',
         srcRemoteExportList: '会话预置清单',
@@ -338,7 +342,11 @@ window.__ModuleLoader__.load({
         defaultUnchecked: 'The write went through, but this profile cannot read the field back to confirm it (no `settings`, and the roster carries no `isDefault`). Nothing errored — and nothing can vouch that the platform agrees.',
         defaultReseated: 'The session already open on the new-task screen was moved too — its chip names her now.',
         defaultViaEditor: 'Warning: this went through the config editor instead of the settings service. The disk is right, but the platform was not told, so the new-task screen may not follow — see the warning in the log.',
-        defaultUnresolved: 'This default points at no usable persona, so a new session silently falls back to the first row. Toggle it again, or pick another.',
+        defaultUnresolved: 'This default points at no usable persona, so a new session fails outright with agent-preset/not-found — it does NOT fall back to the first row. The plugin clears it, and new sessions go back to the profile default.',
+        defaultHealed: 'The default "{from}" is no longer in the roster, so new sessions would be refused with agent-preset/not-found. It has been cleared; new sessions now use "{to}".',
+        defaultHealedNobody: 'The default "{from}" is no longer in the roster, so new sessions would be refused with agent-preset/not-found. It has been cleared, and new sessions fall back to the profile default.',
+        defaultHealedMoved: ' The sessions that had not opened a turn were moved with it.',
+        defaultHealFailed: 'The default "{from}" is no longer in the roster, so new sessions are refused with agent-preset/not-found — and clearing it did not work: {reason}. Pick another one under Settings → Agent Presets.',
         diagnostics: 'Diagnostics',
         defaultReadFrom: 'default read from',
         srcRemoteExportList: 'session preset list',
@@ -1489,6 +1497,32 @@ window.__ModuleLoader__.load({
       return h('span', { style: L.meta }, key === undefined ? String(source ?? '—') : t(key));
     }
 
+    /**
+     * The one-line report for a default the Host had to repair.
+     *
+     * A default that names a preset nothing registers is not cosmetic: the
+     * registry refuses EVERY new session with `agent-preset/not-found`
+     * (`registry.js:643`), so this has to be said even though the user did not ask
+     * — and it has to distinguish 「修好了」 from 「没修掉」, because only the second
+     * one leaves new sessions still refusing to open.
+     * @param {{ ok: boolean, from?: string, nowDefault?: string | null, moved?: string[], reason?: string } | null | undefined} heal
+     * @param {(key: string) => string} t
+     */
+    function healNote(heal, t) {
+      if (heal === null || heal === undefined) return null;
+      const from = heal.from ?? '';
+      if (heal.ok !== true)
+        return t('defaultHealFailed')
+          .replace('{from}', from)
+          .replace('{reason}', heal.reason ?? '');
+      const to = typeof heal.nowDefault === 'string' ? heal.nowDefault : '';
+      const base =
+        to === ''
+          ? t('defaultHealedNobody').replace('{from}', from)
+          : t('defaultHealed').replace('{from}', from).replace('{to}', to);
+      return (heal.moved ?? []).length > 0 ? base + t('defaultHealedMoved') : base;
+    }
+
     function SettingsTab({
       data,
       t,
@@ -1598,12 +1632,26 @@ window.__ModuleLoader__.load({
           h('span', { style: L.meta }, data?.defaultId ?? '—'),
           h(Btn, { variant: 'toolbar', disabled: busy || data?.defaultId == null, onClick: onClearDefault }, t('clearDefault')),
         ),
-        // A default that resolves to no live row is the one failure the platform
-        // never reports: the registry quietly falls back to the profile default,
-        // and the new-task chip stages the first row instead. The setting page is
-        // the only place this can be said out loud, so say it here.
+        /*
+         * A default that resolves to no live row is the failure the platform never
+         * reports: the service throws `agent-preset/not-found` at session creation
+         * (`registry.js:643`) — the composer's 「落到第一项」 fallback is never
+         * reached — so every new task is refused with nothing on screen to explain
+         * it. The Host clears it on open; these two lines are the report.
+         */
         defaultResolves === false
           ? h('div', { style: L.card }, h('span', { style: L.error }, t('defaultUnresolved')))
+          : null,
+        data?.defaultHeal != null
+          ? h(
+              'div',
+              { style: L.card },
+              h(
+                'span',
+                { style: data.defaultHeal.ok === true ? L.ok : L.error },
+                healNote(data.defaultHeal, t),
+              ),
+            )
           : null,
         h(
           SettingRow,

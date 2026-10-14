@@ -1940,8 +1940,14 @@ export function apply(ctx, config = {}) {
    * Panel state. `defaultId` comes from the LIVE roster rather than from the
    * config file: `selectedDefault` can be stale, or point at a preset that no
    * longer resolves, and the roster is what actually decides the next session.
+   *
+   * Opening the panel is also a repair point — see `reconcileDefault`, which runs
+   * first here. A default that names nothing does not merely read wrong: the
+   * registry refuses every new session with `agent-preset/not-found`, so leaving
+   * the panel to only REPORT it would mean reporting a broken app.
    */
   async function status() {
+    const healed = await reconcileDefault();
     // Live, not straight from the cache: `selectedDefault` can be stale or point
     // at a preset that no longer resolves, and the roster is what actually decides
     // the next session. Reporting the cached id is how the default's active border
@@ -1959,6 +1965,24 @@ export function apply(ctx, config = {}) {
       defaultId: cachedDefault.id,
       defaultSource: cachedDefault.source,
       defaultError: cachedDefault.error,
+      /*
+       * What the repair did, in the one case where the user has to know: the
+       * default they set is gone. `null` when there was nothing to repair.
+       * `ok: false` is the degrade path and it has to be visible — a default that
+       * names nothing still blocks every new session, so a silent failure here
+       * would look exactly like the bug it is supposed to fix.
+       */
+      defaultHeal:
+        healed.healed !== null
+          ? {
+              ok: true,
+              from: healed.healed,
+              nowDefault: healed.nowDefault ?? null,
+              moved: healed.moved ?? [],
+            }
+          : healed.from === undefined
+            ? null
+            : { ok: false, from: healed.from, reason: healed.reason },
       skeleton: {
         present: skeleton !== null,
         file: skeleton === null ? path.join(dir, SKELETON_FILE) : skeleton.file,
@@ -2333,7 +2357,26 @@ export function apply(ctx, config = {}) {
     const archived = nextArchiveName(id);
     const wasRegistered = await unregister(id);
     fs.renameSync(full, archived);
-    return { ok: true, id, file: full, archived, wasRegistered };
+    /*
+     * Retiring the wife the default names used to leave `selectedDefault` pointing
+     * at nothing, and the registry then refuses EVERY new session with
+     * `agent-preset/not-found` (`registry.js:643`) — so the one operation that
+     * deliberately removes a persona was also the one that could break the next
+     * new task, with the archived file sitting right there as if all were well.
+     * `rename()` has followed its id for a while (`repointDefault`); removing had
+     * no such step.
+     *
+     * Best effort by design: the file is already archived and that must not be
+     * undone because the config write failed, so the outcome is reported instead.
+     */
+    const dropped = await moveDefaultOff(id);
+    const follow =
+      dropped.ok === true
+        ? { defaultFollowed: "cleared", defaultCleared: true }
+        : dropped.skipped === true
+          ? { defaultFollowed: "unchanged" }
+          : { defaultFollowed: "failed", defaultError: dropped.reason };
+    return { ok: true, id, file: full, archived, wasRegistered, ...follow };
   }
 
   /**
@@ -2977,6 +3020,155 @@ export function apply(ctx, config = {}) {
     }
   }
 
+  /**
+   * Move the default off one id, and take the unstarted sessions with it.
+   *
+   * The counterpart of `setDefault` for the case where the id being named can no
+   * longer be used. The registry resolves the default at session creation —
+   * `get defaultId() { return this.config.selectedDefault.get() ?? this.config.default }`
+   * (`registry.js:494`) — and `retain()` throws
+   *
+   *     agent-preset/not-found: Unknown agent preset: <id>
+   *
+   * (`registry.js:643`, same in `resolve()` and `readDocument()`) when nothing
+   * holds it. So a dangling default is not a display problem that sorts itself
+   * out: it blocks EVERY new session, and the refusal comes from the service, so
+   * the composer's own `presets.find(p => p.isDefault)?.id ?? presets[0]?.id`
+   * fallback (`ui-agent-preset.js:1263`) never gets a chance to run.
+   *
+   * Same two steps as `setDefault`, for the same reasons: write through the
+   * settings service so the app re-reads the roster, confirm it by REREADING
+   * rather than by believing the write, and re-seat the blank sessions that were
+   * still following the id being dropped.
+   *
+   * @param {string} from the id the default is expected to hold right now
+   * @param {{ before?: object }} [context] a `refreshDefault({force:true})` the
+   *   caller already did, so this does not have to repeat the read
+   * @returns {Promise<{ ok: boolean, reason: string | null, skipped?: boolean,
+   *   nowDefault?: string | null, via?: string, moved?: string[], refused?: number }>}
+   */
+  async function moveDefaultOff(from, context = {}) {
+    const wanted = oneLine(from);
+    if (wanted === "")
+      return { ok: false, skipped: true, reason: "没有指定默认" };
+    const before = context.before ?? (await refreshDefault({ force: true }));
+    if (oneLine(before.id) !== wanted)
+      return { ok: false, skipped: true, reason: "默认已经不是它了" };
+    const configEditor = ctx.get("configEditor");
+    if (configEditor === undefined || configEditor === null)
+      return {
+        ok: false,
+        reason: "这个环境没有 configEditor 服务，改不了配置。",
+      };
+    let entry;
+    try {
+      entry = findRegistryEntry(configEditor);
+    } catch (error) {
+      return { ok: false, reason: `读不到配置项：${error.message ?? error}` };
+    }
+    if (entry === undefined)
+      return { ok: false, reason: `找不到 ${REGISTRY_PACKAGE} 这条配置项` };
+    const written = await writeDefault({ configEditor, entry, id: null });
+    if (!written.ok) return { ok: false, reason: `清不掉：${written.error}` };
+    const settled = await verifyDefault(null, {
+      previous: before.field,
+      checkable: before.field !== undefined,
+    });
+    if (!settled.verified && settled.checkable)
+      return {
+        ok: false,
+        reason: `写进去了，但读回来还是「${settled.id ?? "（没指定）"}」`,
+      };
+    /*
+     * The field decides what a session created LATER gets; this decides what the
+     * session already sitting on the new-task screen gets. Without it the blank
+     * session keeps the dead id its header was stamped with — a chip naming a
+     * wife that no longer exists, and a creation path that fails for the same
+     * reason the default did.
+     */
+    const resettled = await resettleUnstarted({
+      to: oneLine(cachedDefault.id),
+      from: wanted,
+    });
+    return {
+      ok: true,
+      reason: null,
+      nowDefault: cachedDefault.id,
+      via: written.via,
+      moved: resettled.moved,
+      refused: resettled.refused,
+    };
+  }
+
+  /**
+   * Clear a `selectedDefault` that names a preset nothing registers.
+   *
+   * Run from `status()` (so opening the panel heals), from the boot scan, and
+   * from `remove()`. Each of those is a moment where the default can be seen to
+   * be dead, and the failure it causes is the worst this plugin can produce:
+   * every new session refused with `agent-preset/not-found`, with nothing in the
+   * UI to explain it and nothing to click to get out.
+   *
+   * It only ever clears — never re-points at another wife. Choosing a persona on
+   * the user's behalf would be a different, louder decision than undoing a broken
+   * one, and the profile default is what the field falls back to.
+   *
+   * @returns {Promise<{ healed: string | null, from?: string, reason: string | null,
+   *   nowDefault?: string | null, moved?: string[], refused?: number, via?: string }>}
+   */
+  async function reconcileDefault() {
+    const before = await refreshDefault({ force: true });
+    const picked = oneLine(before.id);
+    if (picked === "")
+      return { healed: null, reason: "没指定默认" };
+    let rows;
+    try {
+      rows = await ctx.agentPresets.list();
+    } catch (error) {
+      return { healed: null, reason: `读不到名册：${error?.message ?? error}` };
+    }
+    if (!Array.isArray(rows)) return { healed: null, reason: "名册没回数组" };
+    /*
+     * An empty roster is 「还没人注册」, not 「谁都指不到」. A plugin that registers
+     * its presets after this row was applied would otherwise have its default
+     * cleared out from under it for no reason — and the cost of waiting is nil,
+     * because `status()` runs this again every time the panel opens.
+     */
+    if (rows.length === 0)
+      return { healed: null, reason: "名册还是空的，先不动" };
+    if (rows.some((row) => oneLine(row?.id) === picked))
+      return { healed: null, reason: "默认指的这个人设还在" };
+    const dropped = await moveDefaultOff(picked, { before });
+    if (!dropped.ok) {
+      // Say it out loud: a default that names nothing blocks every new session,
+      // and failing to repair it silently is exactly how this looked before —
+      // like nothing was wrong until the next new task refused to open.
+      ctx.logger?.warn?.(
+        `dsh-waifu-agents: 默认人设「${picked}」已经不在名册里了（新会话会被 ` +
+          `agent-preset/not-found 直接挡掉），可是清不掉它：${dropped.reason}`,
+      );
+      return { healed: null, from: picked, reason: dropped.reason };
+    }
+    const now = oneLine(dropped.nowDefault);
+    ctx.logger?.warn?.(
+      `dsh-waifu-agents: 默认人设「${picked}」已经不在名册里了（新会话会被 ` +
+        `agent-preset/not-found 直接挡掉），已清掉这条默认，新会话回落到` +
+        `${now === "" ? " profile 默认" : `「${now}」`}` +
+        (dropped.moved.length > 0
+          ? `，顺手把 ${dropped.moved.length} 个还没开口的会话也挪过去了。`
+          : "。"),
+    );
+    return {
+      healed: picked,
+      from: picked,
+      nowDefault: dropped.nowDefault,
+      moved: dropped.moved,
+      refused: dropped.refused,
+      via: dropped.via,
+      reason: null,
+    };
+  }
+
   /** Point the registry's `selectedDefault` at one wife, or at nobody. */
   async function setDefault(request) {
     const id = String(request.id ?? "").trim();
@@ -3485,11 +3677,17 @@ export function apply(ctx, config = {}) {
         defaultSource: cachedDefault.source,
         defaultError: cachedDefault.error,
         // Does the persisted default name a preset this registry actually holds?
-        // The new-task chip stages `presets.find(p => p.isDefault)?.id ??
-        // presets[0].id` (`ui-agent-preset`), so a default that resolves to
-        // nothing silently comes up on the FIRST row — 「我在面板设了默认，新对话
-        // 却不是她」 with no error anywhere. This flag is what lets the panel say
-        // so instead of leaving the user to guess.
+        //
+        // This used to be written down as 「悄悄落到列表第一项」, quoting the
+        // composer's own `fallback = presets.find(p => p.isDefault)?.id ??
+        // presets[0]?.id ?? ""` (`ui-agent-preset.js:1263`). That is the
+        // RENDERER's fallback and it is never reached: the service resolves the
+        // default first, and `retain()` throws
+        // `agent-preset/not-found: Unknown agent preset: <id>` (`registry.js:643`).
+        // So a dangling default does not degrade to the first row — it blocks
+        // EVERY new session outright, with the panel nowhere in the picture and no
+        // row to click. The flag stays; what it means is 「新会话会直接失败」, and
+        // `reconcileDefault()` now clears it instead of only reporting it.
         //
         // `null` when no face named a default at all: that means 「不知道」, not
         // 「指不到人」. Reporting `false` there would accuse a profile that simply
@@ -4144,6 +4342,23 @@ export function apply(ctx, config = {}) {
     .catch((error) => {
       ctx.logger?.warn?.(
         `dsh-waifu-agents: 首次扫描失败：${error?.message ?? error}`,
+      );
+    })
+    /*
+     * Then the default. `scan()` only ADOPTS files — it never looks at what
+     * `selectedDefault` names — so a persona deleted off disk while the app was
+     * closed leaves the registry pointing at a preset nothing holds, and every
+     * new session is then refused with `agent-preset/not-found`
+     * (`registry.js:643`) with nothing on screen to explain why.
+     *
+     * Chained AFTER the scan rather than run beside it, so the roster already
+     * carries this plugin's own rows: otherwise a `selectedDefault` naming one of
+     * OUR personas would look dangling and be cleared for nothing.
+     */
+    .then(() => reconcileDefault())
+    .catch((error) => {
+      ctx.logger?.warn?.(
+        `dsh-waifu-agents: 默认人设自检失败：${error?.message ?? error}`,
       );
     });
 }
