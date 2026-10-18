@@ -307,6 +307,7 @@ window.__ModuleLoader__.load({
            gone, so the strings are gone: a key left behind is a key a future
            reader will wire up again. */
         teamUnitPerson: '人',
+        teamUnresolved: '解析失败',
         teamUnitGroup: '组',
         teamGone: '已经不存在了',
         teamClipped: '超出上限被截断',
@@ -546,6 +547,7 @@ window.__ModuleLoader__.load({
         teamAddPersona: 'add persona',
         teamAddGroup: 'add group',
         teamUnitPerson: 'members',
+        teamUnresolved: 'unresolved',
         teamUnitGroup: 'group',
         teamGone: 'no longer exists',
         teamClipped: 'clipped by the cap',
@@ -2118,6 +2120,25 @@ window.__ModuleLoader__.load({
             (one.kind === 'group' && groups.includes(one.ref))
           ),
       );
+      /*
+       * The header counts PEOPLE, not picked rows: one group entry can carry
+       * three wives, so `selection.length` printed 「1 人」 for a trio — the
+       * exact number the user then corrected by hand. Resolved the same way
+       * the Host expands: `group:` equality for group entries, the id for
+       * persona entries (the picker only ever stores ids). A stale entry
+       * resolves to nothing here, which is consistent with the grey block
+       * below that says it is gone.
+       */
+      const picked = new Set();
+      for (const one of draft.selection) {
+        if (one.kind === 'group') {
+          for (const row of rows) {
+            if (one.ref !== '' && groupOf(row) === one.ref) picked.add(row.id);
+          }
+        } else if (rows.some((row) => row.id === one.ref)) {
+          picked.add(one.ref);
+        }
+      }
       const named = String(draft.name ?? '') !== '';
       return h(
         'div',
@@ -2174,7 +2195,7 @@ window.__ModuleLoader__.load({
             'div',
             { style: L.sectionHead },
             h('span', { style: L.rowTitle }, t('teamSelection')),
-            h('span', { style: L.meta }, `${draft.selection.length} ${t('teamUnitPerson')}`),
+            h('span', { style: L.meta }, `${picked.size} ${t('teamUnitPerson')}`),
             h('span', { style: L.hint }, t('teamSelectionHint')),
           ),
           draft.selection.length === 0
@@ -2326,7 +2347,19 @@ window.__ModuleLoader__.load({
               'div',
               { style: L.head },
               h('span', { style: L.name }, entry.name),
-              h('span', { style: L.meta }, `${entry.selection.length} ${t('teamUnitPerson')}`),
+              /*
+               * Resolved headcount, not selection entries: a team picked as one
+               * group of three is 「3 人」, and a drifted group reports the
+               * failure instead of a wrong number — the full error renders
+               * right below in TeamPreview.
+               */
+              h(
+                'span',
+                { style: L.meta },
+                entry.preview?.ok === true
+                  ? `${entry.preview.members.length} ${t('teamUnitPerson')}`
+                  : t('teamUnresolved'),
+              ),
               // No preset, no switch: a default has to name something the
               // registry holds, and this team is not registered yet (the sync
               // is in flight, or it failed). Saying which is `teamNoPreset`.
