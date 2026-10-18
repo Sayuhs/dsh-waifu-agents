@@ -2,7 +2,10 @@
 # and one accidental commit of it already sits in the history (0.2.x).
 node_modules/
 
-# Scratch directories written and removed by selftest.mjs.
+# Scratch directories (probe scripts, unpacked platform sources, packing tests).
+# `selftest-v3.mjs` writes to the OS temp dir, not here — this stays because the
+# next investigation will want somewhere to put its scripts, and `.tmp-` is
+# where every one of them has gone so far.
 .tmp-*/
 
 # Tarballs from `pnpm pack`.
@@ -12,3 +15,19 @@ node_modules/
 .DS_Store
 Thumbs.db
 *.log
+
+# Project notes kept outside version control.
+.workbuddy
+
+# Local only — never uploaded, never packaged.
+#
+# What gets published is what a user installs, and what gets pushed is what a
+# user browses. The offline assertion suite (`selftest-v3.mjs`), the scoring
+# harness with its two reference transcripts (`eval-v3.mjs`, `eval/`), and the
+# maintainer's own notes (`MAINTAINER.md`) are useful only here: the plugin
+# imports none of them, so they can live in the working tree without ever being
+# shipped. `npm test` still reads them from disk.
+MAINTAINER.md
+selftest-v3.mjs
+eval-v3.mjs
+eval/

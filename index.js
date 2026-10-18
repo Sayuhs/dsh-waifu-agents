@@ -26,6 +26,7 @@
  *   import      take a whole markdown file, front matter included, and store it
  *   export      return one file's exact text
  *   exportAll   return every file's exact text
+ *   exportArchive  pack the chosen files (default: all) into one base64 `.zip`
  *   refresh     rescan the directory and adopt newly added files
  *   setDir      write `config.dir` back through the configEditor service
  *   updateCheck which version runs, which one is installed, which one the registry has
@@ -71,6 +72,20 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import z from "@deepseek-ai/schemastery";
+import { installTeamRuntime } from "./team-runtime.js";
+import { buildZip } from "./zip.js";
+import {
+  TEAM_FILE,
+  RUN_LOG_FILE,
+  TEAM_LIMIT,
+  NAME_LIMIT,
+  CAP_POLICIES,
+  adoptTeam,
+  saveTarget,
+  storeProblem,
+  defaultRenameFollow,
+  defaultNamesTeam,
+} from "./team.js";
 
 /** Cordis plugin name. */
 export const name = "waifu-agents";
@@ -108,7 +123,7 @@ export const Config = z.object({
    * turn (`agent-preset/locked`) — because moving it "for real" means remounting
    * the whole preset tree, tools included. So switching a running session used
    * to leave the label naming the wife the session was BORN with, which reads as
-   * 「切了但标签没变」. This appends the selection event alone, which moves the
+   * "cut but the label did not change". This appends the selection event alone, which moves the
    * label and nothing else; the persona itself is served by the override either
    * way. Off leaves the label alone.
    */
@@ -276,15 +291,34 @@ const PROMPT_VARIABLE_NAME = /^[a-z][a-z0-9_]*$/;
  * occupy 1..4. A persona file's `order:` is a position *inside this directory* —
  * the panel's drag-reorder writes 1..n and nothing else — so handing that number
  * straight to the registry put both families in the same band and the
- * new-task list read 后藤一里 / standard / 大肥鱼 / ptc / 托尔 … : 内置模式与自定义
- * 人设互相穿插。The offset is applied at registration ONLY, so the file keeps the
- * local order the panel edits while the roster reads 内置在上、自定义在下.
+ * new-task list read 后藤一里 / standard / 大肥鱼 / ptc / 托尔 … : built-in and custom
+ * personas interleave. The offset is applied at registration ONLY, so the file keeps the
+ * local order the panel edits while the roster reads built-in first, custom below.
  *
  * 10000 rather than 10: `order` is a bare sort key with no documented range, and
  * a band wide enough that no plausible hand-written number reaches it cannot put
  * a persona above a built-in by accident.
  */
 export const PERSONA_ORDER_BASE = 10000;
+
+/**
+ * The band team presets sort into — one whole band above the personas.
+ *
+ * A team is made of personas, so on the new-session page it belongs after
+ * them rather than interleaved; and a hand-written persona `order:` would have
+ * to exceed 10000 to reach this band, which {@link PERSONA_ORDER_BASE} exists
+ * to make implausible.
+ */
+export const TEAM_ORDER_BASE = 20000;
+
+/**
+ * What every team preset's id starts with.
+ *
+ * A team is not a file, so nothing in the persona directory can ever collide
+ * with it by accident — and `teamNameForPreset` is how the runtime tells a
+ * session that was BORN on a team from one that was switched onto it.
+ */
+export const TEAM_PRESET_PREFIX = "团队-";
 
 /**
  * A legal preset id; the file name is the preset id.
@@ -654,6 +688,44 @@ export function orderPersonaIds(source) {
 }
 
 /**
+ * Whether a session is supposed to have a persona at all.
+ *
+ * The platform evaluates **every** registered prompt variable, whether or not
+ * the template references it (`@deepseek-ai/dsh-system-prompt:315-316`
+ * iterates every provider before rendering a single section). So without this
+ * gate, a session created on a plain assistant preset would still read the
+ * skeleton, pour a persona, replace its placeholders and record what it
+ * "served" on **every step** — building a string nothing will ever render.
+ *
+ * That is the "a non-persona preset pays nothing" promise made true at the
+ * source, instead of holding only because the template happens to lack the
+ * placeholder.
+ *
+ * Two ways a session can legitimately ask for a persona: an explicit
+ * `/waifu-change` override, or a preset this plugin owns (which `hasRow`
+ * reports, and which also covers "a persona file carries this preset's id").
+ * The global default is deliberately NOT one of them — it is a fallback
+ * *inside* `sessionPersona`, and letting it open the gate here would
+ * re-introduce exactly the cost this gate removes.
+ *
+ * An empty anchor stays open: a session whose preset was never projected is not
+ * the same thing as "explicitly a plain preset", and the default rung still has
+ * to work for it.
+ *
+ * @param {object} [source]
+ * @param {string|null} [source.overrideId] this session's `/waifu-change` pick
+ * @param {string} [source.mountedId] the preset the session was created with
+ * @param {boolean} [source.hasRow] whether that preset carries a persona row
+ * @returns {boolean}
+ */
+export function personaExpected({ overrideId, mountedId, hasRow } = {}) {
+  if (oneLine(overrideId) !== "") return true;
+  const mounted = oneLine(mountedId);
+  if (mounted === "") return true;
+  return hasRow === true;
+}
+
+/**
  * Move one id directly in front of another.
  *
  * @param {string[]} ids the current sequence
@@ -690,7 +762,7 @@ export function reorderIds(ids, movedId, beforeId) {
  * @param {unknown[]} templateRows - capability list
  * @param {{ text: string } | null} [skeleton] - the shared skeleton, if any
  */
-export function buildDefinition(id, meta, body, templateRows, skeleton = null) {
+export function buildDefinition(id, meta, body, templateRows, skeleton = null, orderBase = PERSONA_ORDER_BASE) {
   const name = oneLine(meta.name) || id;
   const localOrder = normalizeOrder(meta.order);
   const poured = assemble(name, body, skeleton === null ? null : skeleton.text);
@@ -698,7 +770,7 @@ export function buildDefinition(id, meta, body, templateRows, skeleton = null) {
     id,
     name,
     description: oneLine(meta.description) || undefined,
-    order: localOrder === undefined ? undefined : PERSONA_ORDER_BASE + localOrder,
+    order: localOrder === undefined ? undefined : orderBase + localOrder,
     // `poured` is still computed: a body the renderer would reject must be
     // refused while the panel is saving it, not after a session has mounted it.
     plugins: templateRows.map((row) =>
@@ -734,6 +806,17 @@ export function apply(ctx, config = {}) {
   );
 
   /**
+   * Team mode's runtime, installed further down once its dependencies exist.
+   *
+   * A `let` rather than a `const` because the pieces it needs — the roster
+   * reader, the persona resolver, the live-agent lookup — are defined later in
+   * this same function, and every one of them is only reachable after `apply`
+   * has returned. `null` is the honest initial value: it means "not installed
+   * yet", and both call sites treat it as "team mode contributes nothing".
+   */
+  let teamRuntime = null;
+
+  /**
    * Patch ids this row may be known by, for the configEditor lookup.
    *
    * The `persona-waifu` pair is the pre-rename spelling of the same row: a
@@ -750,6 +833,58 @@ export function apply(ctx, config = {}) {
 
   /** preset id -> { dispose, rev }: the disposer, plus what was registered. */
   const owned = new Map();
+
+  /**
+   * Ids that are OURS but momentarily unregistered.
+   *
+   * Re-registering takes two halves — `unregister` disposes the old preset, then
+   * `register` installs the new text — and both of them await. A roster read
+   * landing in that gap sees `owned.has(id) === false` for a wife this plugin
+   * still owns, which the panel drew as 「未注册 · 这个 id 被别的所有者占用了」.
+   * That sentence was a false accusation produced by our own bookkeeping, and it
+   * is exactly what a user sees after editing a row and then clicking that same
+   * row's default switch: the blur autosave is mid-swap while the switch's
+   * reload asks for the roster.
+   *
+   * Counted rather than a Set: `update` and `scan` can overlap on one id, and the
+   * first to finish must not release the other one's hold.
+   */
+  const registering = new Map();
+
+  /**
+   * Ids another owner really holds, as of the last scan.
+   *
+   * This is the only evidence that 「这个 id 被别的所有者占用了」 is true, which is
+   * why the panel reads it before saying it. Without it the row could only guess
+   * — and the guess was wrong exactly when it mattered.
+   */
+  const foreign = new Set();
+
+  /**
+   * Has one scan finished with a readable roster?
+   *
+   * Until it has, `owned` is empty because nothing has been registered YET — not
+   * because a row failed. The panel reads `owned` to decide whether to draw
+   * 「未注册」, and a read that lands in that startup window would paint every
+   * single row as unregistered: the most alarming possible rendering of "still
+   * booting". Changing the directory restarts this plugin, so that window is
+   * reachable with the panel already open.
+   */
+  let scannedOnce = false;
+
+  const holdRegistration = (id) => {
+    const key = oneLine(id);
+    if (key === "") return;
+    registering.set(key, (registering.get(key) ?? 0) + 1);
+  };
+
+  const releaseRegistration = (id) => {
+    const key = oneLine(id);
+    const count = registering.get(key);
+    if (count === undefined) return;
+    if (count <= 1) registering.delete(key);
+    else registering.set(key, count - 1);
+  };
 
   const fileFor = (id) => path.join(dir, `${id}.md`);
 
@@ -945,7 +1080,7 @@ export function apply(ctx, config = {}) {
    * runs after this plugin has already moved the session's chip
    * ({@link rememberSessionPreset}) onto the previous override, so reading the
    * chip then would only read back the plugin's own last answer — which is
-   * exactly the 「/waifu-reset 回到上一个换过的人」 bug this field exists to
+   * exactly the "/waifu-reset back to the last switched face" bug this field exists to
    * kill. A session that was re-picked on the new-task screen makes the point:
    * its header still names the preset it was BORN with while its chip names the
    * pick, and `/waifu-reset` owes the pick.
@@ -1026,7 +1161,7 @@ export function apply(ctx, config = {}) {
    * One persona's assembled text as the disk has it right now.
    * @returns {{ ok: boolean, text: string, name: string, problems: string[] } | null}
    */
-  function personaText(id) {
+  function personaText(id, withSkeleton = true) {
     const full = fileFor(id);
     let parsed;
     try {
@@ -1040,7 +1175,7 @@ export function apply(ctx, config = {}) {
     const poured = assemble(
       name,
       parsed.body,
-      skeletonFor(parsed.meta, skeleton) === null ? null : skeleton.text,
+      withSkeleton && skeletonFor(parsed.meta, skeleton) !== null ? skeleton.text : null,
     );
     if (poured.ok) return { ok: true, text: poured.text, name, problems: [] };
     return {
@@ -1058,13 +1193,26 @@ export function apply(ctx, config = {}) {
    * prompt down at interpolation time — the one failure this plugin must never
    * cause. An unusable candidate is skipped, never sent.
    */
-  function safeText(id) {
-    const candidate = personaText(id);
+  function safeText(id, withSkeleton = true) {
+    const candidate = personaText(id, withSkeleton);
     if (candidate === null) return null;
     if (candidate.ok) return candidate;
     const check = assemble(candidate.name, candidate.text, null);
     if (!check.ok) return null;
     return { ok: true, text: check.text, name: candidate.name, problems: [] };
+  }
+
+  /**
+   * Body only, for team mode.
+   *
+   * A discussion has no tools, so pouring the solo skeleton into every member
+   * buys nothing and costs 1543 characters per head. The transferable part of
+   * that skeleton is emitted once by `TEAM_COMMON_RULES` instead. This is the
+   * same text minus the frame — not a shortened persona: her own words are
+   * untouched, only the shared wrapper is dropped.
+   */
+  function personaBody(id) {
+    return safeText(id, false);
   }
 
   /** Last text each session was actually served — the final rung, never empty. */
@@ -1079,7 +1227,7 @@ export function apply(ctx, config = {}) {
    * stays model-visible) and the new text is served correctly — and the model
    * still answered as the FIRST persona it had introduced itself as. Its own
    * earlier turns outrank the system prompt. A revocation that names that identity
-   * contradicts those turns; 「其它身份一律作废」 never says which words are wrong,
+   * contradicts those turns; "all other identities are void" never says which words are wrong,
    * and was measured not to work.
    */
   const servedNames = new Map();
@@ -1090,7 +1238,7 @@ export function apply(ctx, config = {}) {
    * The persona each session was served at its LAST assembly.
    *
    * The question both the switch notice and the identity snapshot need answered
-   * is「这一轮要说的人设，和上一轮说的是同一个吗」— and the answer cannot come
+   * is "is the persona spoken this round the same as last round?" — and the answer cannot come
    * from the persona's SOURCE. `source === 'override'` was the old test for "this
    * session was moved", and it is false on the way BACK: `/waifu-reset` (or a
    * change to whichever persona the session is mounted on) resolves through the
@@ -1174,17 +1322,17 @@ export function apply(ctx, config = {}) {
    * The write is NOT the truth; the reread is. Reporting the write on its own is
    * how the panel and the platform disagree: the roster and the panel readers
    * then name an id the registry does not have, the row the user just moved the
-   * default off keeps wearing the active border (直到下一次进入才自愈), and the
+   * default off keeps wearing the active border (it only heals on next entry), and the
    * next new task comes up on the profile default instead of the wife the user
    * had just chosen. Poll briefly instead of guessing.
    *
    * `field` is the explicit `selectedDefault` as the settings face reports it —
    * `null` when it is deliberately unset — and is `undefined` on a profile with
    * no `settings` face at all. Only the first form can confirm a CLEAR; the
-   * roster faces resolve 「没指定」 to the profile default and cannot tell the two
+   * roster faces resolve "unspecified" to the profile default and cannot tell the two
    * apart, so they are checked against `previous` instead.
    *
-   * @param {string | null} wanted the value the write committed; `null` = 谁都不指定
+   * @param {string | null} wanted the value the write committed; `null` = specify nobody
    * @param {{ previous?: string | null, checkable?: boolean }} [context] what the
    *   read said before the write, and whether any face can confirm the field
    * @returns {Promise<{ id: string | null, verified: boolean, checkable: boolean, attempts: number }>}
@@ -1238,6 +1386,20 @@ export function apply(ctx, config = {}) {
       return { id, source, text: found.text, name: found.name, rungs };
     }
     return { id: null, source: "none", text: null, name: null, rungs };
+  }
+
+  /**
+   * The gate, bound to this session's live state.
+   *
+   * The decision itself lives in the exported {@link personaExpected} so it can
+   * be tested as a rule; this only supplies the three facts it needs.
+   */
+  function expectsPersona(sessionId, mountedId) {
+    return personaExpected({
+      overrideId: overrideOf(sessionId),
+      mountedId,
+      hasRow: hasPersonaRow(mountedId),
+    });
   }
 
   /**
@@ -1313,7 +1475,7 @@ export function apply(ctx, config = {}) {
    *
    * The persona text IS a system prompt, but swapping it mid-conversation is a
    * weak signal: the history is already full of the previous voice, so a model
-   * that keeps answering as her is the single most-reported "换人没生效". Saying
+   * that keeps answering as her is the single most-reported "switch did not take". Saying
    * it in the served text is what re-anchors that turn.
    *
    * "Replaces another one" is a fact about the SESSION, not about which rung the
@@ -1476,7 +1638,7 @@ export function apply(ctx, config = {}) {
    *       event.type === "agent-preset/selected" ? event.data.agentPreset : state
    *
    * — written by the platform's own `select()`. Which is why a switched session
-   * kept showing the wife it was BORN with, and why 「这里能动态调整吗」 had no
+   * kept showing the wife it was BORN with, and why "can this be adjusted dynamically" had no
    * obvious answer.
    *
    * `select()` itself is unavailable here: for a session that has already opened
@@ -1575,7 +1737,7 @@ export function apply(ctx, config = {}) {
    *
    * so the official page moves the default AND re-seats the blank session on it,
    * while the plugin used to do only the first. The chip then kept naming the wife
-   * the blank session was born with: 「插件里改默认，新会话没跟着变」, with the
+   * the blank session was born with: "changed the default in the plugin, but the new session did not follow", with the
    * registry already correct — which is why the Agent-Presets page showed the
    * right badge at the same moment.
    *
@@ -1634,7 +1796,47 @@ export function apply(ctx, config = {}) {
   }
 
   /**
+   * **There is no team block in the served prompt, and deleting it is a fix.**
+   *
+   * This used to call `teamRuntime.stage(agent)` on every assembly and append
+   * whatever text came back. In v3 that text is always `""` — a discussion
+   * builds its own request and installs nothing on the root agent — so the call
+   * bought nothing, while costing a full team resolve on every step: read the
+   * team store, scan the persona directory, resolve every member.
+   *
+   * The platform resolves **every** registered prompt variable on every step,
+   * whether or not the template references it
+   * (`@deepseek-ai/dsh-system-prompt:315-316`). So that resolve was paid by
+   * every session of every kind, every step, forever, for a string that was
+   * either empty or appended to a prompt a team turn never reads.
+   *
+   * The drift notices are not lost, because they were never the right channel:
+   * `/waifu-team` reports them at bind time and `stateOf` reports them to the
+   * panel. A team that silently degrades stays visible through the thing the
+   * user just typed, which is where they would look anyway.
+   */
+
+  /**
    * The prompt variable every persona row points at; called once per assembly.
+   *
+   * ## The two early returns ARE the cost model
+   *
+   * The platform resolves **every** registered prompt variable on **every**
+   * step, whether or not the template being assembled references it
+   * (`@deepseek-ai/dsh-system-prompt:315-316`). "Nobody asks for it" therefore
+   * saves tokens but not work: whatever this function does, it does for every
+   * session in the process, on every assembly. Two answers have to leave before
+   * a single file is touched:
+   *
+   *   1. **A session born on a team preset.** Its preset names a team, not a
+   *      file, and a team turn builds its own request — the root prompt is
+   *      never read by the discussion. This used to fall through to the
+   *      `default` rung and pour the **global default** persona into a team
+   *      session, which was not merely wasted: it put an unrelated single-voice
+   *      prompt into every turn the team does not own.
+   *   2. **A session that never asked for a persona** — a plain platform preset
+   *      with no `/waifu-change` (see `personaExpected`). One `existsSync` is
+   *      all this path may cost.
    *
    * It must never throw and never return text the renderer would choke on: a
    * throw here means the session cannot start at all, which is a far worse
@@ -1645,14 +1847,37 @@ export function apply(ctx, config = {}) {
     const raw = agent?.session?.id;
     const sessionId = typeof raw === "string" ? raw : "";
     const mountedId = anchorOf(agent);
+    const onTeamPreset = teamNameForPreset(mountedId) !== null;
+    /*
+     * A session *actually running* a team discussion gets no persona body: the
+     * discussion builds its own request and never reads the root prompt. The
+     * test is `isTeamSession` (off/bound lookups only, no disk), **not**
+     * `teamNameForPreset(mountedId) !== null`: the latter stays true for a
+     * session that was *born* on a team preset even after it left team mode,
+     * which is exactly how a session could read as a bare, no-persona model.
+     *
+     * A session born on a team preset but no longer on it (e.g. the team
+     * shrunk to one member, or the user moved off it) falls through to the
+     * normal rungs below — where `sessionPersona` skips the team-preset id (its
+     * persona file does not exist) and lands on the default persona.
+     */
+    if (onTeamPreset) {
+      if (teamRuntime?.isTeamSession?.(agent) === true) return "";
+      // Not on a team any more: skip the `expectsPersona` gate (which answers
+      // false for a team preset — no persona row, no override) and serve the
+      // default rung directly.
+    } else if (!expectsPersona(sessionId, mountedId)) {
+      return "";
+    }
     try {
       const found = sessionPersona(sessionId, mountedId);
       if (found.text !== null) {
         const before = sessionId === "" ? [] : (servedNames.get(sessionId) ?? []);
         // Recorded here, not by the caller: this provider is the only place that
         // knows what a turn was actually served, and it runs first (see
-        // `noteServed`). What decides the notice is「这一轮的人设和上一轮不同」
-        // — a fact about the session, not about which rung served it.
+        // `noteServed`). What decides the notice is whether this round's persona
+        // differs from the last round's — a fact about the session, not about
+        // which rung served it.
         noteServed(sessionId, found, before[before.length - 1]);
         const served = reAnchored(sessionId, found)
           ? withSwitchNotice(found.text, found.name, before)
@@ -1673,6 +1898,12 @@ export function apply(ctx, config = {}) {
         `dsh-waifu-agents: 解析人设失败：${error?.message ?? error}`,
       );
     }
+    /*
+     * Reached only by a session this plugin owns whose file is temporarily
+     * unreadable — the team rung left with the early return above. Serving the
+     * last good text is better than serving nothing, and better than serving
+     * somebody else.
+     */
     const previous = sessionId === "" ? undefined : lastGood.get(sessionId);
     if (previous !== undefined) return previous;
     ctx.logger?.warn?.(
@@ -1725,8 +1956,9 @@ export function apply(ctx, config = {}) {
    * single voice and needs no reminder, and staying silent keeps its prompt
    * byte-for-byte what it was before this existed.
    *
-   * The condition is「这一轮的人设和上一轮不同」, never「它是从 override 那一层
-   * 解析出来的」. The second reading is what shipped first, and `/waifu-reset` is
+     * The condition is whether this round's persona differs from the last round's,
+     * never whether it was resolved from the override rung. The second reading is what
+     * shipped first, and `/waifu-reset` is
    * its counter-example: coming back to the mounted persona resolves through the
    * `mounted` rung, so the reminder went silent on the one turn the model had a
    * competing voice to drop. See {@link servedIds} for the measurement.
@@ -1738,8 +1970,16 @@ export function apply(ctx, config = {}) {
     const raw = agent?.session?.id;
     const sessionId = typeof raw === "string" ? raw : "";
     if (sessionId === "") return "";
+    /*
+     * A session that never had a persona has no identity to re-anchor, and
+     * saying nothing is the whole contract for it. Checked before the lookup so
+     * a plain preset does not pay for pouring a default persona only to discard
+     * the result (see `personaExpected`).
+     */
+    const mountedId = anchorOf(agent);
+    if (!expectsPersona(sessionId, mountedId)) return "";
     try {
-      const found = sessionPersona(sessionId, anchorOf(agent));
+      const found = sessionPersona(sessionId, mountedId);
       if (found.id === null) return "";
       // "Did the persona change" — asked of the session, not of the rung it came
       // off. The old test here was `found.source !== "override"`, which is true on
@@ -1831,11 +2071,20 @@ export function apply(ctx, config = {}) {
     }
   }
 
-  /** Does this session's composition carry one of our persona rows? */
+  /**
+   * Does this session's composition carry one of our persona rows?
+   *
+   * `owned` answers for every preset this plugin registered; a file on disk
+   * covers a preset id that a persona file carries but that was never
+   * registered. What this must **not** do is parse the file and assemble the
+   * text — it is called from `personaExpected`, which sits on the unconditional
+   * per-step variable path, and the only question being asked is whether a row
+   * exists at all.
+   */
   function hasPersonaRow(mountedId) {
     const id = oneLine(mountedId);
     if (id === "") return false;
-    return owned.has(id) || personaText(id) !== null;
+    return owned.has(id) || fs.existsSync(fileFor(id));
   }
 
   function readTemplate() {
@@ -1877,7 +2126,16 @@ export function apply(ctx, config = {}) {
         chars: parsed.chars,
         charsFull: poured.text.length,
         problems: poured.problems,
-        owned: owned.has(id),
+        /*
+         * `registering` counts as owned: the preset is still this plugin's, it is
+         * merely between two halves of a re-registration (see the declaration).
+         * Reporting it as unowned turns our own churn into a conflict warning.
+         * Before the first scan settles there is no verdict at all, so the answer
+         * is "yes, ours" rather than "no" — see `scannedOnce`.
+         */
+        owned: scannedOnce !== true || owned.has(id) || registering.has(id),
+        /* Whether a REAL conflict was observed: only `scan` can know that. */
+        foreign: foreign.has(id),
         mtimeMs: parsed.mtimeMs,
         size: parsed.size,
       });
@@ -1886,6 +2144,247 @@ export function apply(ctx, config = {}) {
       if (!seen.has(key)) fileCache.delete(key);
     return out;
   }
+
+  /**
+   * Team mode, wired to this plugin's own seams.
+   *
+   * `team-runtime.js` owns everything team-shaped; what it cannot know is where
+   * this install keeps its files, who a session currently is, and how this
+   * plugin reads its own directory. Those four answers are the whole of the
+   * coupling — everything else crosses as plain data, so `team.js` stays a leaf
+   * and the runtime is testable without a host.
+   */
+  teamRuntime = installTeamRuntime(ctx, {
+    storeFile: path.join(path.dirname(overrideFile), TEAM_FILE),
+    /*
+     * The ledger sits beside `teams.json` — the same directory the user already
+     * owns for this plugin, so a backup or a clean-up does not have to know
+     * about a second location.
+     */
+    runLogFile: path.join(path.dirname(overrideFile), RUN_LOG_FILE),
+    roster: listFiles,
+    personaTextOf: safeText,
+    /*
+     * Team mode asks for the body only. The runtime prefers this over
+     * `personaTextOf` when it exists, so a host that does not provide it still
+     * works (it just pays the old per-member skeleton).
+     */
+    personaBodyOf: personaBody,
+    coordinatorOf: (agent) => {
+      const sessionId = oneLine(agent?.session?.id);
+      if (sessionId === "") return null;
+      const found = sessionPersona(sessionId, anchorOf(agent));
+      if (found.id === null) return null;
+      return { id: found.id, name: found.name ?? found.id };
+    },
+    /*
+     * Which team this session was BORN on — the team preset it was created
+     * with, if any. This is the default half of the pairing: the preset decides
+     * what a session starts as, and `/waifu-team` is the override on top, in
+     * exactly the shape the global default persona and `/waifu-change` already
+     * have.
+     */
+    teamForPreset: (agent) => teamNameForPreset(anchorOf(agent)),
+    /*
+     * The chip move. `team-runtime` owns the binding, but the preset chip is
+     * the platform's — so it crosses as a callback, the same boundary as
+     * `liveAgentFor`. Best-effort: a team not registered as a preset (sync not
+     * finished, or registration failed) simply leaves the chip where it is.
+     */
+    moveChipToTeam: (agent, teamName) => {
+      const id = teamPresetIdByName(teamName);
+      return id !== "" && rememberTeamPreset(agent, id);
+    },
+    serviceOf,
+    liveAgentFor,
+    logger: ctx.logger,
+  });
+  ctx.on("dispose", () => teamRuntime?.dispose());
+
+  /* ------------------------------------------------- teams as real presets */
+
+  /**
+   * Every team is registered as an agent preset, which is what puts it on the
+   * new-session page next to the personas.
+   *
+   * This is the same relationship a persona has to a session, and it is worth
+   * naming: picking a team when the session is CREATED is the default, and
+   * `/waifu-team` is the per-session override on top of it — exactly how the
+   * global default persona and `/waifu-change` already relate. A team that only
+   * existed as a command would be the one thing on that page you cannot choose.
+   *
+   * Two maps, not one: `teamPresets` is id -> team name (how a running session
+   * is recognised), `teamOwned` is id -> what was registered (how it is taken
+   * back). A session's own preset id is the only thing `anchorOf` can read, so
+   * without the first map there is no way to know a session was born on a team.
+   */
+  const teamPresets = new Map();
+  const teamOwned = new Map();
+
+  /** The team a session was born on, or `null`. */
+  function teamNameForPreset(presetId) {
+    const found = teamPresets.get(oneLine(presetId));
+    return typeof found === "string" ? found : null;
+  }
+
+  /**
+   * The preset id for one team name.
+   *
+   * A team name is whatever the user typed — spaces, punctuation, anything —
+   * while a preset id has to satisfy {@link ID_OK}. So the id is derived, and
+   * derived ids can collide (「素晴 三人」 and 「素晴三人」 both flatten to the same
+   * string), which is what the `taken` set and the numeric suffix are for.
+   * @param {string} name
+   * @param {Set<string>} taken ids already claimed in this pass
+   */
+  function teamPresetIdFor(name, taken) {
+    const flat = `${TEAM_PRESET_PREFIX}${oneLine(name).replace(/\s+/gu, "-")}`;
+    // Drop what a preset id cannot carry. The `a` prefix is the trick: `ID_OK`
+    // refuses a leading `-`, so testing the candidate on its own would throw
+    // away every hyphen, but `a-` is a legal id — which is exactly the answer
+    // wanted for a character that is legal everywhere except the front.
+    const kept = [...flat].filter((ch) => ID_OK.test(`a${ch}`)).join("");
+    const base = ID_OK.test(kept) ? kept : `${TEAM_PRESET_PREFIX}team`;
+    if (!taken.has(base)) return base;
+    for (let n = 2; n < 1000; n += 1) {
+      const candidate = `${base}-${n}`;
+      if (!taken.has(candidate)) return candidate;
+    }
+    return `${base}-${Date.now()}`;
+  }
+
+  /** The registered preset id for a team name, or `""` when it is not one. */
+  function teamPresetIdByName(name) {
+    const wanted = oneLine(name);
+    if (wanted === "") return "";
+    for (const [id, held] of teamPresets) {
+      if (held === wanted) return id;
+    }
+    return "";
+  }
+
+  /**
+   * Move the session chip onto a TEAM preset.
+   *
+   * Same append as {@link rememberSessionPreset}, but the guard differs: a
+   * persona id must be in `owned`, while a team id must be in `teamPresets`
+   * (the registry's team half). Without this split `/waifu-team` could never
+   * move the chip — team ids are not personas.
+   */
+  function rememberTeamPreset(agent, id) {
+    if (config.syncSessionChip === false) return false;
+    const session = agent?.session;
+    if (session === undefined || session === null) return false;
+    if (id === "" || !teamPresets.has(id)) return false;
+    try {
+      session.append("agent-preset/selected", { agentPreset: id });
+      return true;
+    } catch (error) {
+      ctx.logger?.warn?.(
+        `dsh-waifu-agents: 会话标签没跟上（团队 ${id}）：${error?.message ?? error}`,
+      );
+      return false;
+    }
+  }
+
+  /**
+   * Bring the registered team presets in line with `teams.json`.
+   *
+   * Called after every write, and once at install: a team that exists only in
+   * the file cannot be chosen when a session is created, which is the whole
+   * point of registering it. Re-registration is keyed on the description
+   * because that carries the member list — a team that gained a member has to
+   * be re-registered or the new-session page keeps advertising the old line-up.
+   *
+   * Never throws: a team that cannot be registered is a team you can still
+   * reach with `/waifu-team`, and failing the write that created it would be a
+   * worse answer than warning.
+   */
+  async function runTeamPresetSync() {
+    if (teamRuntime === null) return;
+    const store = teamRuntime.store();
+    const wanted = new Map();
+    const taken = new Set();
+    for (const team of store.teams) {
+      const id = teamPresetIdFor(team.name, taken);
+      taken.add(id);
+      const preview = teamRuntime.preview(team.name);
+      const members =
+        preview.ok === true ? (preview.members ?? []).map((row) => row.name) : [];
+      const description =
+        members.length === 0
+          ? "团队模式 · 这一队现在解析不出成员。"
+          : `团队模式 · ${members.length} 人：${members.join("、")}`;
+      wanted.set(id, { name: team.name, description });
+    }
+    for (const [id, entry] of [...teamOwned]) {
+      const want = wanted.get(id);
+      if (want !== undefined && want.name === entry.name && want.description === entry.description) continue;
+      teamOwned.delete(id);
+      teamPresets.delete(id);
+      try {
+        await entry.dispose();
+      } catch (error) {
+        ctx.logger?.warn?.(`dsh-waifu-agents: 卸下团队预设「${entry.name}」失败：${error?.message ?? error}`);
+      }
+    }
+    let at = 0;
+    for (const [id, want] of wanted) {
+      at += 1;
+      if (teamOwned.has(id)) continue;
+      try {
+        // The body is only validated, never served: the preset row is a
+        // placeholder and `resolvePersonaText` returns `""` for a team preset
+        // (a discussion builds its own request). So no persona text reaches
+        // the model through this preset at all — the team prompt does.
+        const definition = buildDefinition(
+          id,
+          { name: want.name, description: want.description, order: at },
+          `你与「${want.name}」这一队一起工作。`,
+          readTemplate(),
+          null,
+          TEAM_ORDER_BASE,
+        );
+        const dispose = await ctx.agentPresets.register(definition);
+        ctx.on("dispose", dispose);
+        teamOwned.set(id, { dispose, ...want });
+        teamPresets.set(id, want.name);
+      } catch (error) {
+        ctx.logger?.warn?.(
+          `dsh-waifu-agents: 团队「${want.name}」没能注册成预设（还能用 /waifu-team 选它）：${error?.message ?? error}`,
+        );
+      }
+    }
+  }
+
+  /*
+   * Serialized, because it is called from a `void` at install AND awaited by
+   * every `teamSet` write — so a write that lands while the install-time pass
+   * is still walking the store runs two passes at once. Two passes interleave
+   * as "register an id the other one is registering", the registry refuses the
+   * duplicate, and the team silently ends up with no preset at all.
+   *
+   * Chained rather than dropped: a pass skipped because one is in flight would
+   * miss the team the caller just wrote.
+   */
+  let teamSyncChain = Promise.resolve();
+  function syncTeamPresets() {
+    teamSyncChain = teamSyncChain.then(
+      () => runTeamPresetSync(),
+      () => runTeamPresetSync(),
+    );
+    return teamSyncChain;
+  }
+
+  /*
+   * Not awaited: `apply` must not block on the registry, and a team that fails
+   * to register is still reachable through `/waifu-team`. What must not happen
+   * is an unhandled rejection, so the failure is logged here rather than
+   * swallowed by `void`.
+   */
+  void syncTeamPresets().catch((error) => {
+    ctx.logger?.warn?.(`dsh-waifu-agents: 同步团队预设失败：${error?.message ?? error}`);
+  });
 
   /** Highest order in the directory plus one — the panel never asks for it. */
   function nextOrder() {
@@ -1970,6 +2469,13 @@ export function apply(ctx, config = {}) {
    * for.
    */
   async function scan() {
+    /*
+     * Recomputed, never accumulated: a conflict that was resolved by renaming
+     * the file has to stop being reported. `foreign` is the evidence the panel
+     * reads before it accuses a row of being taken by another owner, so a stale
+     * entry would be a lie that survives a fix.
+     */
+    foreign.clear();
     const taken = new Set();
     try {
       for (const preset of await ctx.agentPresets.list()) taken.add(preset.id);
@@ -2008,26 +2514,43 @@ export function apply(ctx, config = {}) {
       const owner = owned.get(item.id);
       if (owner !== undefined) {
         if (owner.rev === rev) continue;
-        await unregister(item.id);
+        holdRegistration(item.id);
         try {
+          await unregister(item.id);
           await registerOne(item.id, parsed.meta, parsed.body);
           reloaded.push(item.id);
         } catch (error) {
           problems.push(`${item.id}: ${error.message ?? error}`);
+        } finally {
+          releaseRegistration(item.id);
         }
         continue;
       }
       if (taken.has(item.id)) {
+        /*
+         * `taken` counts OUR rows too, and an id that is mid-registration is
+         * still ours. Calling that a foreign conflict is how the panel ended up
+         * accusing a wife of stealing her own id; a read that lands here simply
+         * has nothing to do.
+         */
+        if (registering.has(item.id)) continue;
+        foreign.add(item.id);
         skipped.push({ id: item.id, reason: "已经有人注册了这个 id" });
         continue;
       }
+      holdRegistration(item.id);
       try {
         await registerOne(item.id, parsed.meta, parsed.body);
         added.push(item.id);
       } catch (error) {
         problems.push(`${item.id}: ${error.message ?? error}`);
+      } finally {
+        releaseRegistration(item.id);
       }
     }
+    // A roster we could read, and every file walked: `owned` is now an answer
+    // rather than "not yet", which is what lets the panel draw 「未注册」 at all.
+    scannedOnce = true;
     return { added, reloaded, skipped, problems };
   }
 
@@ -2213,6 +2736,13 @@ export function apply(ctx, config = {}) {
       mtimeMs: parsed.mtimeMs,
       size: parsed.size,
       file: full,
+      // The assembled prompt, only for the reader who asked for it. The editor
+      // opens rows constantly and never needs it — `charsFull` already answers
+      // "how long does this get" — while the preview window needs the whole
+      // thing and nothing else. Carrying it on every `get` would double the
+      // payload of every click to the roster payload of the one button that
+      // reads it.
+      ...(request.assembled === true ? { assembled: poured.text } : null),
     };
   }
 
@@ -2271,6 +2801,7 @@ export function apply(ctx, config = {}) {
     const conflict = await ensureFree(id);
     if (conflict !== null) return { ok: false, error: conflict };
     writeAtomic(full, renderPersona({ ...meta, body }));
+    holdRegistration(id);
     try {
       await registerOne(id, meta, body);
     } catch (error) {
@@ -2283,6 +2814,8 @@ export function apply(ctx, config = {}) {
         ok: false,
         error: `注册失败（文件已回滚）：${error.message ?? error}`,
       };
+    } finally {
+      releaseRegistration(id);
     }
     return {
       ok: true,
@@ -2377,8 +2910,17 @@ export function apply(ctx, config = {}) {
     // other, never a half-written merge of both.
     if (moved) fs.renameSync(full, target);
     writeAtomic(target, renderPersona(next));
-    await unregister(id);
+    /*
+     * Both ids are held across the swap. The old one is still the file's name
+     * until `renameSync` above, and the new one is what a roster read sees from
+     * that moment on — while neither is in `owned`, because the platform only
+     * knows one registration at a time. This is the window the panel used to
+     * misread as 「被别的所有者占用了」.
+     */
+    holdRegistration(id);
+    holdRegistration(to);
     try {
+      await unregister(id);
       await registerOne(to, next, next.body);
     } catch (error) {
       if (moved) {
@@ -2398,6 +2940,9 @@ export function apply(ctx, config = {}) {
         ok: false,
         error: `注册失败（文件已还原，点刷新可重试）：${error.message ?? error}`,
       };
+    } finally {
+      releaseRegistration(id);
+      releaseRegistration(to);
     }
     const defaultFollowed = moved ? await repointDefault(id, to) : "unchanged";
     return {
@@ -2439,22 +2984,30 @@ export function apply(ctx, config = {}) {
     const wasOwned = owned.has(from);
     const { meta, body } = parseFrontMatter(fs.readFileSync(fromFile, "utf8"));
     fs.renameSync(fromFile, toFile);
-    await unregister(from);
+    // Both names are ours across the swap; see the note in `update`.
+    holdRegistration(from);
+    holdRegistration(to);
     try {
-      await registerOne(to, meta, body);
-    } catch (error) {
-      fs.renameSync(toFile, fromFile);
-      if (wasOwned) {
-        try {
-          await registerOne(from, meta, body);
-        } catch {
-          // A failed rollback still leaves both files on disk and readable.
+      await unregister(from);
+      try {
+        await registerOne(to, meta, body);
+      } catch (error) {
+        fs.renameSync(toFile, fromFile);
+        if (wasOwned) {
+          try {
+            await registerOne(from, meta, body);
+          } catch {
+            // A failed rollback still leaves both files on disk and readable.
+          }
         }
+        return {
+          ok: false,
+          error: `改名失败（已回滚）：${error.message ?? error}`,
+        };
       }
-      return {
-        ok: false,
-        error: `改名失败（已回滚）：${error.message ?? error}`,
-      };
+    } finally {
+      releaseRegistration(from);
+      releaseRegistration(to);
     }
     // `selectedDefault` is stored as an id, so it has to follow the move:
     // otherwise the default points at a preset that no longer exists, and every
@@ -2539,8 +3092,20 @@ export function apply(ctx, config = {}) {
     if (!fs.existsSync(full))
       return { ok: false, error: `文件不存在：${full}` };
     const archived = nextArchiveName(id);
-    const wasRegistered = await unregister(id);
-    fs.renameSync(full, archived);
+    /*
+     * Held across the archive rename: between `unregister` and `renameSync` the
+     * file is still `<id>.md` with no registration behind it, and a roster read
+     * in that gap used to draw 「未注册 · 被别的所有者占用了」 on a wife the user
+     * had just archived on purpose.
+     */
+    holdRegistration(id);
+    let wasRegistered = false;
+    try {
+      wasRegistered = await unregister(id);
+      fs.renameSync(full, archived);
+    } finally {
+      releaseRegistration(id);
+    }
     /*
      * Retiring the wife the default names used to leave `selectedDefault` pointing
      * at nothing, and the registry then refuses EVERY new session with
@@ -2641,6 +3206,7 @@ export function apply(ctx, config = {}) {
     );
     if (!poured.ok) return { ok: false, error: poured.problems.join("；") };
     fs.renameSync(source, target);
+    holdRegistration(id);
     try {
       await registerOne(id, meta, parsed.body);
     } catch (error) {
@@ -2649,6 +3215,8 @@ export function apply(ctx, config = {}) {
         ok: false,
         error: `恢复失败（已放回归档）：${error.message ?? error}`,
       };
+    } finally {
+      releaseRegistration(id);
     }
     return { ok: true, id, archived, file: target, renamed: id !== base };
   }
@@ -2939,10 +3507,11 @@ export function apply(ctx, config = {}) {
    * Every file's exact text in one response.
    *
    * Kept for the `/persona` command and for anything scripting against the
-   * route; the PANEL no longer uses it — it lists first and then pulls one file
-   * at a time with `export`, so a directory of long personas never becomes one
-   * multi-megabyte response. The cap below is what keeps the command path from
-   * becoming that by accident: a limit nobody can hit is not a limit.
+   * route. The PANEL does not use it: one JSON array of every body would be the
+   * multi-megabyte response this avoids, so a batch export goes through
+   * `exportArchive` (one `.zip`, one download) and a single file through
+   * `export`. The cap below is what keeps the command path from becoming that
+   * by accident: a limit nobody can hit is not a limit.
    */
   const EXPORT_ALL_LIMIT = 8 * 1024 * 1024;
 
@@ -2962,6 +3531,84 @@ export function apply(ctx, config = {}) {
       files.push({ id: item.id, filename: `${item.id}.md`, content });
     }
     return { ok: true, files, bytes: total };
+  }
+
+  /**
+   * A batch export as ONE archive.
+   *
+   * The panel used to answer 「导出全部」 by pulling each file separately and
+   * handing the browser a download per file: twelve personas meant twelve save
+   * dialogs, and nothing stopped them from landing in twelve different folders.
+   * A single `.zip` makes the whole batch one dialog and one destination — the
+   * browser cannot be told a directory, so the directory has to be implied.
+   *
+   * `ids` is optional and defaults to every visible file. Hidden personas
+   * (`.md.off`) are NOT included: they are not in the roster, and an archive
+   * containing them would resurrect files the user deliberately put away.
+   */
+  /*
+   * 16MB of raw markdown, which becomes ~21MB of base64 inside one JSON response
+   * — about as large as a single loopback answer should get before the renderer
+   * starts holding three copies of it (string, base64, Blob). A directory that
+   * big is thousands of personas; refusing with a number beats truncating.
+   */
+  const EXPORT_PACK_LIMIT = 16 * 1024 * 1024;
+
+  function exportArchive(request) {
+    const asked = Array.isArray(request?.ids) ? request.ids.map((id) => String(id)) : null;
+    const ids = asked === null ? listFiles().map((item) => item.id) : asked;
+    const entries = [];
+    const missing = [];
+    let total = 0;
+    for (const id of ids) {
+      if (!ID_OK.test(id) || !fs.existsSync(fileFor(id))) {
+        missing.push(id);
+        continue;
+      }
+      let data;
+      try {
+        data = fs.readFileSync(fileFor(id));
+      } catch {
+        missing.push(id);
+        continue;
+      }
+      total += data.length;
+      if (total > EXPORT_PACK_LIMIT) {
+        return {
+          ok: false,
+          truncated: true,
+          error: `一次导出超过上限（${Math.round(EXPORT_PACK_LIMIT / 1024 / 1024)}MB）：分批导出，或者直接去目录里拿文件。`,
+        };
+      }
+      entries.push({ name: `${id}.md`, data });
+    }
+    if (entries.length === 0) return { ok: false, error: "没有可导出的文件。" };
+
+    const stamp = new Date();
+    const tag = [
+      stamp.getFullYear(),
+      String(stamp.getMonth() + 1).padStart(2, "0"),
+      String(stamp.getDate()).padStart(2, "0"),
+    ].join("");
+    let archive;
+    try {
+      archive = buildZip(entries, { date: stamp });
+    } catch (failure) {
+      return { ok: false, error: String(failure?.message ?? failure) };
+    }
+    /*
+     * base64 rather than a byte array: the route answers JSON, and a 300-entry
+     * archive as `[12,34,…]` would be several times the payload for no benefit.
+     * The panel turns it back into a Blob and hands it to one download.
+     */
+    return {
+      ok: true,
+      filename: `waifu-personas-${tag}.zip`,
+      count: entries.length,
+      bytes: total,
+      missing,
+      base64: archive.toString("base64"),
+    };
   }
 
   /**
@@ -3362,8 +4009,18 @@ export function apply(ctx, config = {}) {
     const clearing = id === "";
     if (!clearing && !ID_OK.test(id))
       return { ok: false, error: `id 不合法：${id}` };
-    if (!clearing && !fs.existsSync(fileFor(id)))
-      return { ok: false, error: `没有这个 wife：${id}` };
+    /*
+     * Two kinds of preset can hold this field: a persona, and a TEAM — every
+     * team is registered as an agent preset (`runTeamPresetSync`), which is
+     * what puts it on the new-session page at all.
+     *
+     * Requiring a `.md` file made 「把这一队设成默认」 impossible: the id is
+     * real, the registry holds it, and the write was refused for naming no
+     * file. `teamPresets` is the authority for that half — not the 「团队-」
+     * prefix, which a persona file could legally carry.
+     */
+    if (!clearing && !teamPresets.has(id) && !fs.existsSync(fileFor(id)))
+      return { ok: false, error: `没有这个人设，也没有这个团队：${id}` };
     const configEditor = ctx.get("configEditor");
     if (configEditor === undefined || configEditor === null) {
       return {
@@ -3939,9 +4596,354 @@ export function apply(ctx, config = {}) {
     };
   }
 
+  /* ------------------------------------------------------------- team mode */
+
+  /**
+   * Team mode, as the panel sees it — the **directory** half only.
+   *
+   * The feature has two halves that must never be conflated (design doc §6): the
+   * teams written in `teams.json`, and which of them one session is on. The
+   * settings panel can only ever see the first one, and that is a property of
+   * the platform rather than a choice: `SettingsPluginsTabOwnerProps` is an
+   * empty type, so no session id ever reaches the panel (see the header note in
+   * `client.js`). A panel that offered "bind this session" would be guessing at
+   * a session it cannot name. So it edits the file, and `/waifu-team` — which
+   * runs *inside* a session and therefore knows which one — does the binding.
+   *
+   * What this op adds over reading the file is that every stored team is
+   * resolved live against the persona directory: the panel shows what the name
+   * points at *today*, including a member a deleted persona quietly took with
+   * it, instead of echoing back the selection that was typed months ago.
+   */
+  async function teamState() {
+    if (teamRuntime === null) {
+      return { ok: false, error: "团队运行时还没装上，这个会话看不到团队。" };
+    }
+    await refreshDefault();
+    const store = teamRuntime.store();
+    const teams = [];
+    for (const entry of store.teams) {
+      const preview = teamRuntime.preview(entry.name);
+      teams.push({
+        name: entry.name,
+        /*
+         * The preset id this team is registered under, or `""` when it is not
+         * one (the sync is still in flight, or it failed — see
+         * `runTeamPresetSync`).
+         *
+         * The panel needs it for one reason: `selectedDefault` holds a PRESET
+         * id, and a team's id is derived from its name, so without this field
+         * the team tab cannot tell whether the switch it is drawing is the one
+         * that is actually on. It is also what the switch writes — the same
+         * field the persona rows write, because the platform only has one.
+         */
+        presetId: teamPresetIdByName(entry.name),
+        selection: entry.selection,
+        roles: entry.roles,
+        writeScope: entry.writeScope,
+        // Shipped back so the editor can show what the team already carries: a
+        // field the panel writes but never reads would be wiped the first time
+        // somebody opens an entry to rename it.
+        background: entry.background,
+        // No `thinking` row. There is one way a team talks; shipping the old
+        // field back to the client would invite it to render a dead control.
+        lastResolved: entry.lastResolved,
+        lastResolvedAt: entry.lastResolvedAt,
+        preview:
+          preview.ok !== true
+            ? {
+                ok: false,
+                error: preview.error ?? "解析失败。",
+                hint: preview.hint ?? [],
+                notices: preview.notices ?? [],
+                members: [],
+              }
+            : {
+                ok: true,
+                single: preview.single === true,
+                members: (preview.members ?? []).map((row) => ({ id: row.id, name: row.name })),
+                removed: preview.removed ?? [],
+                truncated: (preview.truncated ?? []).map((row) => row.name),
+                notices: preview.notices ?? [],
+                drift: preview.drift ?? { added: [], removed: [], comparable: false },
+                capacity: preview.capacity ?? { max: null, policy: "refuse" },
+              },
+      });
+    }
+    return {
+      ok: true,
+      teams,
+      /*
+       * Which preset the new-session default names right now — the same value
+       * `status()` reports, shipped here too so the team tab draws its switch
+       * from the payload it already has. `refreshDefault()` above is what makes
+       * this a read of the live registry rather than of our own last write.
+       */
+      defaultId: cachedDefault.id,
+      defaultSource: cachedDefault.source,
+      groups: teamRuntime.groups(),
+      batch: { maxTeamSize: store.maxTeamSize, groupCapPolicy: store.groupCapPolicy },
+      // `thinkingModes` used to be advertised here so the panel could offer
+      // "stage / ventriloquist". There is one way a team talks now, so the
+      // option is gone rather than hidden — a client that still asks for it
+      // must not silently render a control that does nothing.
+      policies: CAP_POLICIES,
+      problem: storeProblem(store),
+      // The member picker needs the tag as well as the name: picking a group is
+      // picking whoever carries that tag, and a row that hides it makes the
+      // resulting "3 人" look arbitrary.
+      rows: choosableRows().map((row) => {
+        const full = listFiles().find((item) => item.id === row.id);
+        return { id: row.id, name: row.name, group: oneLine(full?.group) };
+      }),
+    };
+  }
+
+  /**
+   * Write the directory. Never the binding.
+   *
+   * There is deliberately no `bind` action here (see `teamState`): the panel
+   * cannot name a session, so a bind op would be reachable only by a caller
+   * that already has one — and that caller is the `/waifu-team` command, which
+   * goes through `teamRuntime.bind()` directly. An HTTP action nothing can
+   * legitimately call is a surface that will eventually be called wrongly.
+   *
+   * Every write is rolled back in memory when the file write fails, so the
+   * panel can never end up showing a team the file does not have.
+   */
+  async function teamSet(request) {
+    if (teamRuntime === null) {
+      return { ok: false, error: "团队运行时还没装上，这个会话看不到团队。" };
+    }
+    const action = oneLine(request.action);
+
+    if (action === "save") {
+      const name = oneLine(request.name).slice(0, NAME_LIMIT);
+      if (name === "") return { ok: false, error: "团队得有一个名字。" };
+      /*
+       * `original` is the name the editor was opened with (see `saveTarget`).
+       * Without it a rename is indistinguishable from a create, and the panel's
+       * "edit this team" ended up adding a second team under the new name while
+       * leaving the old one in place.
+       */
+      const original = oneLine(request.original).slice(0, NAME_LIMIT);
+      const store = teamRuntime.store();
+      const target = saveTarget(store.teams, name, original);
+      if (target.error !== null) return { ok: false, error: target.error };
+      const at = target.at;
+      if (at < 0 && store.teams.length >= TEAM_LIMIT) {
+        return { ok: false, error: `最多存 ${TEAM_LIMIT} 个团队，先删掉几个。` };
+      }
+      const before = at < 0 ? null : store.teams[at];
+      /*
+       * Merge over the stored entry instead of replacing it. The panel's editor
+       * only sends `selection` and `background`, so a plain replace would drop
+       * `roles` / `writeScope` / `lastResolved` on every rename — a rename must
+       * not cost the team its role sentences.
+       */
+      const entry = adoptTeam(name, before === null ? (request.team ?? {}) : { ...before, ...(request.team ?? {}) });
+      if (entry.selection.length === 0) {
+        return { ok: false, error: "这个团队一条选择都没有，等于空队。至少要加一个人设或一个组。" };
+      }
+      if (at < 0) store.teams.push(entry);
+      else store.teams[at] = entry;
+      if (teamRuntime.save() !== true) {
+        if (at < 0) store.teams.pop();
+        else store.teams[at] = before;
+        return { ok: false, error: `写 ${TEAM_FILE} 失败，改动没有生效。` };
+      }
+      /*
+       * Sessions bound to the old name have to follow it, or a rename silently
+       * takes every live session off the team — they would keep resolving a
+       * name that no longer exists and report "团队不在文件里了" instead.
+       */
+      if (target.renamed === true) teamRuntime.rename(original, name);
+      /*
+       * The preset ids are read from the live map on both sides of the sync:
+       * the old one only exists until it is rewritten below, the new one only
+       * after. A team preset id is derived from the team name, so a rename
+       * changes it — and a default that named the old id is left pointing at
+       * nothing, which refuses EVERY new session with
+       * `agent-preset/not-found` rather than degrading to a stale label.
+       */
+      const oldPreset = target.renamed === true ? teamPresetIdByName(original) : "";
+      await syncTeamPresets();
+      const newPreset = target.renamed === true ? teamPresetIdByName(name) : "";
+      /*
+       * `cachedDefault` is read fresh here: the registry is the authority, and a
+       * 2-second-old cache is exactly the window a rename lands in. The decision
+       * itself is `team.js`'s (`defaultRenameFollow`), so it can be tested
+       * without a host — the id comparison is the part that is easy to get
+       * wrong, and a boolean computed inline was not coverable at all.
+       */
+      const held = (await refreshDefault({ force: true })).id;
+      const follow = defaultRenameFollow({ defaultId: held, from: oldPreset, to: newPreset });
+      const defaultFollowed = follow === null ? "unchanged" : await repointDefault(follow.from, follow.to);
+      /*
+       * A repoint that did not land leaves the field naming an id nothing
+       * registers, and the consequence is out of proportion to its cause: every
+       * new session is refused. The panel has no room to say this (the toast is
+       * 「已保存」), so the log does — same rule as the `configEditor` degrade in
+       * `writeDefault`.
+       */
+      if (defaultFollowed === "failed")
+        ctx.logger?.warn?.(
+          `dsh-waifu-agents: 团队「${name}」改名后默认没跟上（${oldPreset} → ${newPreset}），` +
+            "新会话可能起不来（agent-preset/not-found）。去「设置 → Agent Presets」重选一次默认。",
+        );
+      return { ok: true, action, created: before === null, renamed: target.renamed, defaultFollowed, state: await teamState() };
+    }
+
+    if (action === "remove") {
+      const name = oneLine(request.name);
+      const store = teamRuntime.store();
+      const at = store.teams.findIndex((item) => item.name === name);
+      if (at < 0) return { ok: false, error: `没有叫「${name}」的团队。` };
+      const gone = store.teams.splice(at, 1)[0];
+      if (teamRuntime.save() !== true) {
+        store.teams.splice(at, 0, gone);
+        return { ok: false, error: `写 ${TEAM_FILE} 失败，没删掉。` };
+      }
+      /*
+       * Deleting a team has to unbind the sessions that were on it, or the
+       * deletion is only half done: a binding left behind resolves to an error
+       * on every assembly, so the session sits in team mode forever with
+       * nothing to run. The only other way out is switching persona, and the
+       * user has no reason to know they need it.
+       */
+      /*
+       * Two things have to be dropped, not one. `forget` clears the bindings;
+       * unregistering the preset is what stops sessions that were BORN on this
+       * team from being a team session any more — their own preset id still
+       * names it, and without this they would keep resolving against a team
+       * that no longer exists.
+       */
+      const unbound = teamRuntime.forget(name);
+      const gonePreset = teamPresetIdByName(name);
+      await syncTeamPresets();
+      /*
+       * …and the third thing: the global default, when it names this team's
+       * preset. Deleting a team whose preset IS the default would leave the
+       * field naming an id nothing registers — every new session refused, with
+       * no row left to click to get out. `moveDefaultOff` skips (with a reason)
+       * when the default was somebody else, and it re-seats the blank sessions
+       * that were still following this id.
+       */
+      const held = (await refreshDefault({ force: true })).id;
+      const defaultCleared = defaultNamesTeam({ defaultId: held, presetId: gonePreset })
+        ? await moveDefaultOff(gonePreset)
+        : null;
+      // Same rule as the rename above: a clear that did not land leaves a
+      // default naming an id nothing registers, and nothing on screen can say so.
+      if (defaultCleared !== null && defaultCleared.ok !== true && defaultCleared.skipped !== true)
+        ctx.logger?.warn?.(
+          `dsh-waifu-agents: 删掉团队「${name}」时全局默认没清掉（${defaultCleared.reason ?? ""}），` +
+            "新会话可能起不来（agent-preset/not-found）。去「设置 → Agent Presets」重选一次默认。",
+        );
+      return { ok: true, action, unbound, defaultCleared: defaultCleared === null ? null : defaultCleared.ok, state: await teamState() };
+    }
+
+    if (action === "batch") {
+      const store = teamRuntime.store();
+      const before = { maxTeamSize: store.maxTeamSize, groupCapPolicy: store.groupCapPolicy };
+      /*
+       * `batch` is a partial update, so an omitted field means "leave it", not
+       * "clear it" — the panel sends only what the user touched. Clearing the
+       * cap has its own spelling: an explicit `null` (or an empty string, which
+       * is what an emptied number input posts).
+       */
+      if (request.maxTeamSize === null || request.maxTeamSize === "") {
+        store.maxTeamSize = null;
+      } else if (request.maxTeamSize !== undefined) {
+        const cap = Number(request.maxTeamSize);
+        if (!Number.isSafeInteger(cap) || cap < 2) {
+          return {
+            ok: false,
+            error: "上限要么留空（不设限），要么是不小于 2 的整数。一个人的队不该走团队模式。",
+          };
+        }
+        store.maxTeamSize = cap;
+      }
+      if (request.groupCapPolicy !== undefined) {
+        const policy = oneLine(request.groupCapPolicy);
+        if (!CAP_POLICIES.includes(policy)) {
+          store.maxTeamSize = before.maxTeamSize;
+          return { ok: false, error: `上限策略只能是 ${CAP_POLICIES.join(" / ")}。` };
+        }
+        store.groupCapPolicy = policy;
+      }
+      if (teamRuntime.save() !== true) {
+        store.maxTeamSize = before.maxTeamSize;
+        store.groupCapPolicy = before.groupCapPolicy;
+        return { ok: false, error: `写 ${TEAM_FILE} 失败，改动没有生效。` };
+      }
+      return { ok: true, action, state: await teamState() };
+    }
+
+    if (action === "reload") {
+      teamRuntime.reload();
+      await syncTeamPresets();
+      return { ok: true, action, state: await teamState() };
+    }
+
+    return { ok: false, error: `不认识的团队操作：${action || "（空）"}。` };
+  }
+
+  /**
+   * What `/waifu-team`'s picker offers for ONE session.
+   *
+   * Read-only, and deliberately so: this is the same seam `/waifu-change`'s
+   * picker uses (`waifuState`), and the same rule applies — the popup shows
+   * what can be chosen and then RUNS the host command, so the switch lands in
+   * the session log instead of being a silent side effect of opening a list.
+   *
+   * The "single mode" row is gone. It used to sit under the team list as a
+   * "mode" choice, which made a team picker look like it offered a team that
+   * was not one, and — worse — a session that had left team mode via that row
+   * could then serve no persona at all. A team picker lists teams only; leaving
+   * a team is `/waifu-change` (switch to a single persona) or `/waifu-reset`
+   * (back to the session's own persona).
+   */
+  async function teamPick(request) {
+    if (teamRuntime === null) {
+      return { ok: false, error: "团队运行时还没装上，这个会话看不到团队。" };
+    }
+    const state = await teamState();
+    if (state.ok !== true) return state;
+    const sessionId = oneLine(request.sessionId);
+    const now = sessionId === "" ? null : teamRuntime.stateOf(sessionId).team ?? null;
+    // `now` is what the file says the session is on, which is not the same as
+    // team mode being LIVE: a team that resolves to one member falls back to
+    // single mode. Marking it current would draw a check next to a team that
+    // is not actually running, so the mark follows the mode, not the binding.
+    const live = sessionId === "" ? null : teamRuntime.stateOf(sessionId).mode === "team" ? now : null;
+    const rows = state.teams.map((entry) => {
+      const members = entry.preview?.ok === true ? (entry.preview.members ?? []) : [];
+      const detail =
+        entry.preview?.ok !== true
+          ? "这一队现在解析不出成员。"
+          : members.length === 0
+            ? "这一队现在是空的。"
+            : `${members.length} 人：${members.map((row) => row.name).join("、")}`;
+      return {
+        id: entry.name,
+        label: entry.name,
+        detail,
+        ...(live === entry.name ? { active: true } : null),
+        group: { name: "teams", label: "团队" },
+      };
+    });
+    return {
+      ok: true,
+      rows,
+      active: live,
+      bound: now,
+      problem: state.problem,
+    };
+  }
+
   /** The roster a picker may offer: exactly what can be mounted right now. */
-  function choosableRows() {
-    const orderOf = (item) =>
+  function choosableRows() {    const orderOf = (item) =>
       typeof item.order === "number" ? item.order : Number.MAX_SAFE_INTEGER;
     return listFiles()
       .filter((item) => item.problems.length === 0 && item.idOk === true)
@@ -4212,6 +5214,7 @@ export function apply(ctx, config = {}) {
     if (op === "import") return importMd(request);
     if (op === "export") return exportOne(request);
     if (op === "exportAll") return exportAll();
+    if (op === "exportArchive") return exportArchive(request);
     if (op === "template") return exportTemplate();
     if (op === "setDir") return setDir(request);
     if (op === "setDefault") return setDefault(request);
@@ -4220,6 +5223,9 @@ export function apply(ctx, config = {}) {
     if (op === "waifuApply") return waifuApply(request);
     if (op === "waifuClear") return waifuClear(request);
     if (op === "waifuOrder") return waifuOrder(request);
+    if (op === "teamState") return teamState();
+    if (op === "teamSet") return teamSet(request);
+    if (op === "teamPick") return teamPick(request);
     if (op === "updateCheck") return updateCheck();
     if (op === "updateApply") return updateApply(request);
     if (op === "updateProgress") return updateProgress(request);
@@ -4310,6 +5316,13 @@ export function apply(ctx, config = {}) {
         };
       }
       const already = overrideOf(sessionId);
+      /*
+       * Switching to a single persona leaves team mode. Without this the
+       * in-memory binding outranks the freshly chosen persona on the next
+       * assembly (`teamNameFor` reads `bound` first), so `/waifu-change` would
+       * report a switch the model never sees.
+       */
+      teamRuntime?.unbind?.(sessionId);
       setOverride(sessionId, matched.id, mountedOf(agent));
       // The override is what the model is told; this is what the row above the
       // conversation shows. Without it a running session keeps the label of the
@@ -4401,44 +5414,63 @@ export function apply(ctx, config = {}) {
       const sessionId = sidOf(agent);
       if (sessionId === "")
         return { kind: "error", text: "这个命令只能在会话里用。" };
-      const had = overrideOf(sessionId);
+      const hadPersona = overrideOf(sessionId);
       // Read before the clear: clearing is what drops the record that holds it.
       // Without it the chip — which this plugin moved onto the override — is the
       // only thing left to read, and the session comes back as the LAST wife it
       // was switched to instead of the one it started this conversation as.
       const home = restingOf(sessionId);
       setOverride(sessionId, null);
-      // Put the label back where the persona went: the chip has to stop naming a
-      // wife this session no longer talks as.
+      /*
+       * A `/waifu-team` binding is an override too. Clearing only the persona
+       * record left the team in place, so reset answered "本来就没有覆盖" while
+       * the next turn still ran as that team — the exact report that made the
+       * command look broken.
+       */
+      const team = teamRuntime?.unbind?.(sessionId) ?? { bound: undefined, off: false };
+      // Put the label back where the session lives: `restoreSessionPreset` falls
+      // back to the header (the preset it was BORN with), which is what a team
+      // switch never changed.
       restoreSessionPreset(agent, home);
       await refreshDefault();
-      if (had === null)
+      if (hadPersona === null && team.bound === undefined && team.off !== true)
         return {
           kind: "success",
           text: "这个会话本来就没有覆盖，什么都没改。",
         };
       dropShadow(sessionId);
-      const mountedId = home !== "" ? home : mountedOf(agent);
-      const found = sessionPersona(sessionId, mountedId);
+      // Where it lands. `home` is the persona it ran before the first switch;
+      // otherwise the chip was restored to the born preset. If that target is a
+      // TEAM preset, naming a persona would be the wrong answer — the session
+      // is back on that team, not on a single wife.
+      const target = home !== "" ? home : oneLine(agent?.session?.header?.agentPreset);
+      const targetTeam = teamNameForPreset(target);
+      const found = targetTeam === null ? sessionPersona(sessionId, target) : null;
       const where =
-        found.id === null
-          ? "这个会话现在没有可用的人设"
-          : `回到 ${found.name}（${SOURCE_LABEL[found.source] ?? found.source}）`;
+        targetTeam !== null
+          ? `回到团队「${targetTeam}」`
+          : found === null || found.id === null
+            ? "这个会话现在没有可用的人设"
+            : `回到 ${found.name}（${SOURCE_LABEL[found.source] ?? found.source}）`;
+      const parts = [];
+      if (hadPersona !== null) parts.push(`人设覆盖（之前是「${hadPersona}」）`);
+      if (team.bound !== undefined) parts.push(`团队绑定（之前是「${team.bound}」）`);
+      const cleared = parts.length > 0 ? `已清掉${parts.join("、")}` : "已取消团队模式";
       /*
        * The chip is the persisted half of this: a session is re-mounted from
        * what its projection names, so leaving it on the dropped override would
-       * bring her back on the next resume. If the append did not take (chip sync
+       * bring it back on the next resume. If the append did not take (chip sync
        * off, or the platform refused it), say so instead of reporting the move
        * as done — the failure would otherwise resurface as 「重启后怎么又是她」.
        */
       const chip = mountedOf(agent);
       const drift =
-        home !== "" && chip !== "" && chip !== home
-          ? `\n（会话标签没跟上：现在还写着「${chip}」，重启这个会话可能又变回她）`
+        target !== "" && chip !== "" && chip !== target
+          ? `\n（会话标签没跟上：现在还写着「${chip}」，重启这个会话可能又变回它）`
           : "";
       return {
         kind: "success",
-        text: `已清掉覆盖（之前是「${had}」）· ${where} · 从下一轮开始生效${drift}`,
+        text: `${cleared} · ${where} · 从下一轮开始生效${drift}`,
       };
     },
   });

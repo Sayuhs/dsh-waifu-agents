@@ -12,7 +12,8 @@
     "agent-preset"
   ],
   "scripts": {
-    "test": "node selftest.mjs"
+    "test": "node selftest-v3.mjs",
+    "eval": "node eval-v3.mjs"
   },
   "exports": {
     ".": "./index.js",
@@ -23,14 +24,18 @@
   "files": [
     "index.js",
     "client.js",
+    "team.js",
+    "zip.js",
+    "team-simulate.js",
+    "team-snapshot.js",
+    "team-runtime.js",
     "cordis.patch.yml",
     "template.json",
     "personas/",
     "locale/",
     "icon.png",
-    "README.md",
-    "MAINTAINER.md",
-    "selftest.mjs"
+    "docs/",
+    "README.md"
   ],
   "icon": "./icon.png",
   "dependencies": {
