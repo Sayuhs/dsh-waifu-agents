@@ -2523,6 +2523,32 @@ export function apply(ctx, config = {}) {
   }
 
   /**
+   * Does this roster row carry OUR fingerprint?
+   *
+   * Both persona presets and team presets are registered through
+   * `buildDefinition`, whose `plugins` rows include `@deepseek-ai/dsh-persona`
+   * rewritten with `PERSONA_PLACEHOLDER` as the prefix — a combination nothing
+   * else registers. A roster row matching it is this plugin's own previous
+   * instance, not a foreign owner.
+   *
+   * The shape of `agentPresets.list()` rows is NOT promised to include the
+   * registered `plugins` array; if it does not, this answers `false` and the
+   * scan reports the conflict exactly as it did before — the fingerprint is
+   * only ever evidence FOR a reclaim, never against a row.
+   * @param {unknown} row - one entry of `ctx.agentPresets.list()`
+   * @returns {boolean}
+   */
+  function isOwnPresetShape(row) {
+    const plugins = row?.plugins;
+    if (!Array.isArray(plugins)) return false;
+    return plugins.some(
+      (plugin) =>
+        plugin?.name === "@deepseek-ai/dsh-persona" &&
+        plugin?.config?.prefix === PERSONA_PLACEHOLDER,
+    );
+  }
+
+  /**
    * Register every file that is not already taken by this or another owner, and
    * RE-register the ones whose text changed since they were registered.
    *
@@ -2539,9 +2565,10 @@ export function apply(ctx, config = {}) {
      * entry would be a lie that survives a fix.
      */
     foreign.clear();
-    const taken = new Set();
+    const roster = new Map();
     try {
-      for (const preset of await ctx.agentPresets.list()) taken.add(preset.id);
+      for (const preset of await ctx.agentPresets.list())
+        roster.set(preset.id, preset);
     } catch (error) {
       return {
         added: [],
@@ -2589,14 +2616,40 @@ export function apply(ctx, config = {}) {
         }
         continue;
       }
-      if (taken.has(item.id)) {
+      if (roster.has(item.id)) {
         /*
-         * `taken` counts OUR rows too, and an id that is mid-registration is
+         * `roster` counts OUR rows too, and an id that is mid-registration is
          * still ours. Calling that a foreign conflict is how the panel ended up
          * accusing a wife of stealing her own id; a read that lands here simply
          * has nothing to do.
          */
         if (registering.has(item.id)) continue;
+        /*
+         * Ghost reclaim. Within one DSH process, an uninstall leaves the
+         * preset table holding this plugin's old entries (observed on a
+         * remove-then-reinstall with HMR: every row read 「被别的所有者占用」
+         * until a restart cleared the table). Such a ghost is not another
+         * owner — it is OUR previous instance, and it carries our fingerprint:
+         * only this plugin registers presets whose plugins rows contain
+         * `@deepseek-ai/dsh-persona` with our placeholder as the prefix.
+         * Re-registering over it is therefore reclaiming, not stealing — and
+         * if the registry refuses the duplicate, the catch falls through to
+         * the same foreign report as before, so the attempt cannot make
+         * anything worse.
+         */
+        if (isOwnPresetShape(roster.get(item.id))) {
+          holdRegistration(item.id);
+          try {
+            await registerOne(item.id, parsed.meta, parsed.body);
+            added.push(item.id);
+            continue;
+          } catch {
+            // The registry refused the overwrite: report the conflict below,
+            // exactly as if no reclaim had been attempted.
+          } finally {
+            releaseRegistration(item.id);
+          }
+        }
         foreign.add(item.id);
         skipped.push({ id: item.id, reason: "已经有人注册了这个 id" });
         continue;
@@ -5226,15 +5279,116 @@ export function apply(ctx, config = {}) {
   }
 
   /**
+   * Remove THIS package's entries from `minimumReleaseAgeExclude`.
+   *
+   * The list lives in a profile's `pnpm-workspace.yaml` — a file pnpm owns —
+   * but every entry naming `dsh-waifu-agents` exists BECAUSE of this plugin:
+   * pnpm wrote it to let our install past the 24h freshness policy. Deleting
+   * our own lines is not reaching into another owner's file any more than
+   * unregistering our presets is; the entries that name other packages, and
+   * every other byte of the file, pass through untouched.
+   *
+   * The profile name is only visible when `DSH_PROFILE_DIR` reaches this
+   * process; without it every profile is scanned, which is safe precisely
+   * because the filter matches our name and nothing else. A profile that
+   * never installed this plugin has no matching line and is left identical —
+   * the write happens only when a line was actually removed.
+   * @returns {{ cleaned: string[], failed: string[] }}
+   */
+  function cleanReleaseAgeExcludes() {
+    const cleaned = [];
+    const failed = [];
+    const profileDir = process.env.DSH_PROFILE_DIR
+      ? path.resolve(process.env.DSH_PROFILE_DIR)
+      : null;
+    let candidates;
+    if (profileDir !== null) {
+      candidates = [path.join(profileDir, "pnpm-workspace.yaml")];
+    } else {
+      const profiles = path.join(homeFromEnv(process.env).home, "profiles");
+      try {
+        candidates = fs
+          .readdirSync(profiles, { withFileTypes: true })
+          .filter((row) => row.isDirectory())
+          .map((row) => path.join(profiles, row.name, "pnpm-workspace.yaml"));
+      } catch {
+        candidates = [];
+      }
+    }
+    for (const full of candidates) {
+      let raw;
+      try {
+        raw = fs.readFileSync(full, "utf8");
+      } catch {
+        continue; // no such file — a profile without pnpm state, nothing to do
+      }
+      const lines = raw.split("\n");
+      const keep = [];
+      let changed = false;
+      for (let at = 0; at < lines.length; ) {
+        const line = lines[at];
+        if (!/^minimumReleaseAgeExclude\s*:/.test(line)) {
+          keep.push(line);
+          at += 1;
+          continue;
+        }
+        // Flow form `key: [a, b]`: filter inside the brackets, drop the key
+        // when nothing of ours was in it (then the line is reproduced as-is).
+        const flow = /^minimumReleaseAgeExclude\s*:\s*\[(.*)\]\s*\r?$/.exec(line);
+        if (flow !== null) {
+          const items = flow[1]
+            .split(",")
+            .filter((item) => item.trim() !== "");
+          const rest = items.filter((item) => !item.includes(PACKAGE_NAME));
+          if (rest.length === items.length) {
+            keep.push(line);
+          } else {
+            changed = true;
+            if (rest.length > 0)
+              keep.push(`minimumReleaseAgeExclude: [${rest.join(", ")}]`);
+          }
+          at += 1;
+          continue;
+        }
+        // Block form: gather the list items that follow.
+        const items = [];
+        let cursor = at + 1;
+        while (cursor < lines.length && /^\s+-\s/.test(lines[cursor])) {
+          items.push(lines[cursor]);
+          cursor += 1;
+        }
+        const rest = items.filter((item) => !item.includes(PACKAGE_NAME));
+        if (rest.length === items.length) {
+          keep.push(line, ...items);
+        } else {
+          changed = true;
+          if (rest.length > 0) keep.push(line, ...rest);
+          // zero left: the key goes too — an empty list is noise
+        }
+        at = cursor;
+      }
+      if (!changed) continue;
+      try {
+        writeAtomic(full, keep.join("\n"));
+        cleaned.push(full);
+      } catch (error) {
+        failed.push(`${full}：${error?.message ?? error}`);
+      }
+    }
+    return { cleaned, failed };
+  }
+
+  /**
    * Undo everything this plugin put outside its own package.
    *
    * Only three things are ours and outlive an uninstall: the per-session
    * override store, the `selectedDefault` line this panel writes into the
    * agent-preset registry's config, and — only when explicitly asked — the
-   * persona directory itself. Everything else an install leaves behind belongs to
-   * the platform (the plugin-manager's operation logs, pnpm's store index, the
-   * release-age allow-list entry it wrote at install time), so this op names them
-   * instead of pretending to clean them.
+   * persona directory itself. The freshness allow-list lines naming this
+   * package are ours too (pnpm wrote them for OUR install), and are stripped.
+   * Everything else an install leaves behind belongs to
+   * the platform (the plugin-manager's operation logs, pnpm's store index),
+   * so this op names them instead of pretending to clean them.
    * @param {{ dir?: boolean }} request
    */
   async function purge(request) {
@@ -5251,6 +5405,14 @@ export function apply(ctx, config = {}) {
       }
     }
     overrides = {};
+    try {
+      const excludes = cleanReleaseAgeExcludes();
+      for (const full of excludes.cleaned)
+        done.push(`清掉放行记录 ${full} 里属于本包的条目`);
+      for (const message of excludes.failed) failed.push(`放行记录：${message}`);
+    } catch (error) {
+      failed.push(`放行记录：${error?.message ?? error}`);
+    }
     try {
       const configEditor = ctx.get("configEditor");
       const entry =
@@ -5335,7 +5497,6 @@ export function apply(ctx, config = {}) {
       platform: [
         ".plugin-manager\\logs\\operation-*（安装日志，平台自己累积）",
         "pnpm 内容库索引：需要 pnpm store prune",
-        "pnpm-workspace.yaml 的 minimumReleaseAgeExclude（安装时 pnpm 自己写的放行记录）",
       ],
     };
   }

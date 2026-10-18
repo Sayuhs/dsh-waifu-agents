@@ -259,12 +259,14 @@ window.__ModuleLoader__.load({
         purgeHint: '把本插件留在文件系统里的东西一次清掉：会话覆盖记录、全局默认人设指向。打开右边开关会连人设目录一起删。',
         purgeWithDir: '连人设目录一起删',
         purgeAskTitle: '彻底清理本插件的数据',
-        purgeAskBody: '会删除：会话覆盖记录、全局默认人设指向。安装日志、pnpm 索引、pnpm-workspace.yaml 里的放行记录属于平台，这里不动它们，清理完会列给你。',
+        purgeAskBody: '会删除：会话覆盖记录、全局默认人设指向，以及 pnpm-workspace.yaml 里属于本包的放行记录。安装日志、pnpm 索引属于平台，这里不动它们，清理完会列给你。',
         purgeAskAck: '我知道这会清掉本插件的数据',
         updateBanner: '有新版本 {latest}（当前 {installed}）',
         updateGo: '查看',
         checkUpdate: '检查更新',
         recheck: '重新检查更新',
+        updateUpToDate: '已是最新版本 {installed}',
+        updateCheckFailed: '检查更新失败',
         upToDate: '已是最新版本',
         canUpdateTo: '可更新到',
         nowVersion: '当前',
@@ -505,12 +507,14 @@ window.__ModuleLoader__.load({
         purgeHint: 'Remove everything this plugin left on disk in one go: the session override store and the global-default pointer. The switch on the right also deletes the persona directory.',
         purgeWithDir: 'Also delete the persona directory',
         purgeAskTitle: 'Purge this plugin\'s data',
-        purgeAskBody: 'Deletes the session override store and the global-default pointer. The install logs, the pnpm store index and the release-age allow-list entry belong to the platform and are listed afterwards instead of touched.',
+        purgeAskBody: 'Deletes the session override store, the global-default pointer, and this package\'s own entries in pnpm-workspace.yaml\'s release-age allow-list. The install logs and the pnpm store index belong to the platform and are listed afterwards instead of touched.',
         purgeAskAck: 'I know this removes the plugin\'s data',
         updateBanner: 'Version {latest} is out (running {installed})',
         updateGo: 'Details',
         checkUpdate: 'Check for updates',
         recheck: 'Check again',
+        updateUpToDate: 'Already on the newest version {installed}',
+        updateCheckFailed: 'The update check failed',
         upToDate: 'Up to date',
         canUpdateTo: 'Update to',
         nowVersion: 'running',
@@ -2391,8 +2395,10 @@ window.__ModuleLoader__.load({
               ),
               // No preset, no switch: a default has to name something the
               // registry holds, and this team is not registered yet (the sync
-              // is in flight, or it failed). Saying which is `teamNoPreset`.
-              noPreset ? h('span', { style: L.hint }, t('teamNoPreset')) : null,
+              // is in flight, or it failed). The disabled switch says it on
+              // its own — an inline hint used to sit here and squeezed the
+              // row out of shape on long copy, so it is gone; the refusal
+              // stays said, in the editor, if someone forces the write.
               h('span', { style: L.push }),
               known
                 ? h(SwitchBox, {
@@ -4159,9 +4165,32 @@ window.__ModuleLoader__.load({
       async function checkUpdate() {
         setBusy(true);
         try {
-          setUpdate(await post({ op: 'updateCheck' }));
+          const payload = await post({ op: 'updateCheck' });
+          setUpdate(payload);
+          /*
+           * The banner re-renders from `update`, but a silent re-render is not
+           * an answer: the person pressed a button and gets told, out loud,
+           * which of the three outcomes happened — newer version, already
+           * current, or the registry could not be reached.
+           */
+          if (payload?.updateAvailable === true) {
+            setNote({
+              kind: 'ok',
+              text: t('updateBanner')
+                .replace('{latest}', payload.latest ?? '')
+                .replace('{installed}', payload.installed ?? payload.running ?? ''),
+            });
+          } else if (typeof payload?.error === 'string' && payload.error !== '') {
+            setNote({ kind: 'error', text: `${t('updateCheckFailed')}：${payload.error}` });
+          } else {
+            setNote({
+              kind: 'ok',
+              text: t('updateUpToDate').replace('{installed}', payload?.installed ?? payload?.running ?? ''),
+            });
+          }
         } catch (failure) {
           setUpdate({ error: String(failure?.message ?? failure) });
+          setNote({ kind: 'error', text: `${t('updateCheckFailed')}：${failure?.message ?? failure}` });
         } finally {
           setBusy(false);
         }
