@@ -149,6 +149,9 @@ window.__ModuleLoader__.load({
         updateInstallingFrom: '正在从 {registry} 安装（第 {index}/{total} 个源）…',
         updateApplying: '正在应用配置，请稍候…',
         updateCancelling: '正在停止安装…',
+        updateRemoving: '正在卸载旧版本…',
+        updateReinstalling: '正在安装新版本…',
+        updateHandedOff: '插件已随更新重启；到「插件」页确认版本即可。',
         updateWaiting: '安装进行中，别关掉这个窗口',
         updateElapsed: '已用 {s} 秒',
         updateQuiet: '已经 {s} 秒没等到平台的进度回报，但 pnpm 还在跑',
@@ -395,6 +398,9 @@ window.__ModuleLoader__.load({
         updateInstallingFrom: 'Installing from {registry} (source {index} of {total})…',
         updateApplying: 'Applying the configuration, please wait…',
         updateCancelling: 'Stopping the installation…',
+        updateRemoving: 'Removing the old version…',
+        updateReinstalling: 'Installing the new version…',
+        updateHandedOff: 'The plugin restarted with the update; confirm the version on the Plugins page.',
         updateWaiting: 'Installing — leave this window open',
         updateElapsed: '{s}s elapsed',
         updateQuiet: 'no progress report from the platform for {s}s, but pnpm is still running',
@@ -1401,7 +1407,16 @@ window.__ModuleLoader__.load({
       const phase = String(job.phase ?? 'starting');
       let floor = 3;
       let ceiling = 10;
-      if (phase === 'installing') {
+      if (phase === 'removing') {
+        // The self-removal before the reinstall: brief, but not instant.
+        floor = 6;
+        ceiling = 16;
+      } else if (phase === 'reinstalling') {
+        // The fresh install after the self-removal, before the platform's own
+        // per-registry phases take over and redraw the band.
+        floor = 14;
+        ceiling = 24;
+      } else if (phase === 'installing') {
         // One band per registry tried, so a fallback to a second source is
         // visible as progress instead of as a bar going backwards.
         const index = Math.max(1, Number(job.attempt?.index ?? 1) || 1);
@@ -1431,10 +1446,13 @@ window.__ModuleLoader__.load({
      */
     function progressHeadline(job, t) {
       if (job === null || job === undefined) return '';
+      if (job.handedOff === true) return t('updateHandedOff');
       if (job.done === true) {
         return typeof job.error === 'string' && job.error !== '' ? t('updateFailedTitle') : t('updateDoneTitle');
       }
       const phase = String(job.phase ?? 'starting');
+      if (phase === 'removing') return t('updateRemoving');
+      if (phase === 'reinstalling') return t('updateReinstalling');
       if (phase === 'installing') {
         const attempt = job.attempt;
         const total = Number(attempt?.total ?? 1) || 1;
@@ -1495,6 +1513,7 @@ window.__ModuleLoader__.load({
           .replace('{s}', String(seconds));
       }
       if (typeof job?.error === 'string' && job.error !== '') return t('updateStripFailed');
+      if (job?.handedOff === true) return t('updateHandedOff');
       return t('updateStripDone').replace('{v}', String(job?.result?.version ?? job?.version ?? ''));
     }
 
@@ -1547,7 +1566,17 @@ window.__ModuleLoader__.load({
           { style: { ...L.dialog, maxWidth: '480px', width: '100%' } },
           h('span', { style: L.rowTitle }, t('updateProgressTitle')),
           h('div', { style: L.progressTrack }, h('div', { style: fill })),
-          h('span', { style: failed ? L.error : L.name }, failed ? String(job.error) : done ? progressOutcome(job, t) : progressHeadline(job, t)),
+          h(
+            'span',
+            { style: failed ? L.error : L.name },
+            failed
+              ? String(job.error)
+              : job.handedOff === true
+                ? t('updateHandedOff')
+                : done
+                  ? progressOutcome(job, t)
+                  : progressHeadline(job, t),
+          ),
           note === '' ? null : h('span', { style: L.meta }, note),
           exit === '' ? null : h('span', { style: L.meta }, exit),
           log === ''
@@ -3356,7 +3385,23 @@ window.__ModuleLoader__.load({
         const poll = () => {
           post({ op: 'updateProgress', requestId })
             .then((payload) => {
-              if (!alive || payload.idle === true) return;
+              if (!alive) return;
+              if (payload.idle === true) {
+                /*
+                 * The host no longer knows this job. That is the two-step
+                 * update succeeding the loud way: the removal plus reinstall
+                 * ended in an HMR reload, the module that owned the job is
+                 * gone, and the fresh module answering polls has never heard
+                 * of this requestId. Report it as a hand-off to the restart
+                 * instead of letting the bar sit on its last phase forever.
+                 */
+                setJob((prev) =>
+                  prev !== null && prev !== undefined && prev.done !== true
+                    ? { ...prev, done: true, handedOff: true, error: null }
+                    : prev,
+                );
+                return;
+              }
               setJob((prev) => (prev === null || prev === undefined ? prev : { ...prev, ...payload }));
             })
             .catch(() => {

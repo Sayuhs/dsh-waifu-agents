@@ -40,12 +40,31 @@
  *
  * `updateApply` is what makes a published fix reachable without a shell: the
  * panel posts it, `latestVersion` asks the registry, and the install goes
- * through the very service the Plugins page uses — `pnpm add <name>@<version>`,
- * which also REWRITES the profile's version range. That range, not the plugin,
- * is what keeps an old copy installed: `^0.0.1` can never resolve `0.1.0`, so
- * every release used to need a hand-edited spec. An already-installed package
- * is never hot-reloaded — the manager answers `restart-required`, and so does
- * this op, which is why the panel says so out loud.
+ * through the very service the Plugins page uses. Three layers, tried in
+ * order:
+ *
+ * 1. TARBALL (updates of an installed package): the new version's tarball URL
+ *    is the one spec shape the manager's HMR precheck cannot match by name —
+ *    its package name is only known after pnpm runs — so the install reaches
+ *    pnpm over the installed copy, and the HMR re-composition replaces the
+ *    running plugin in place. No removal, no restart in the success path.
+ *    This also rewrites the profile's saved dependency from a version range
+ *    to the exact URL; the next update's URL differs again, so nothing is
+ *    ever refused as already-installed on this road twice.
+ * 2. NAME (fresh installs, and the two-step's second half): the plain
+ *    `name@version` spec keeps a fresh install's saved dependency a clean
+ *    range.
+ * 3. TWO-STEP (fallback if the tarball road is somehow refused with
+ *    `already-installed`): remove the running bundle, then install the new
+ *    version from the same fiber — a resolved promise never interrupts the
+ *    fiber that awaited it. Whether the fiber survives its own removal is
+ *    what real-machine use finds out; every failure is caught and reported
+ *    with the manual remove-then-install on the Plugins page as the last
+ *    resort.
+ *
+ * The personas directory and `teams.json` live outside the package, so no
+ * path through any layer — success, half-done, or failure — touches user
+ * data.
  *
  * No configuration is required: `resolveDir` picks the directory from the row
  * config, then from `<home>/personas`, then — on a machine that does not have it
@@ -226,6 +245,50 @@ async function latestVersion(registry) {
   if (typeof latest !== "string" || latest === "")
     throw new Error(`${base} 没有给出 dist-tags.latest`);
   return { version: latest, registry: base };
+}
+
+/**
+ * The tarball URL of a published version.
+ *
+ * This is the one spec shape the manager's HMR precheck CANNOT refuse with
+ * `already-installed`: the precheck matches specs it can name before pnpm
+ * runs — a registry name, a local directory, or the exact git/tarball spec the
+ * dependency was saved with — and a fresh tarball URL names a package only
+ * after pnpm has fetched it. Installing version N+1 from its own tarball
+ * therefore reaches pnpm over an installed version N, and the HMR
+ * re-composition replaces the running plugin in place (the documented
+ * behavior). The abbreviated packument names the URL authoritatively
+ * (`dist.tarball`), so one small GET asks the registry; a registry that will
+ * not answer falls back to the npm tarball path convention, which every
+ * registry this plugin can be pointed at follows
+ * (`<base>/<name>/-/<name>-<version>.tgz`). Constructing never throws, so this
+ * helper always returns a usable URL.
+ * @param {string} [registry] registry base URL; the row config may override it
+ * @param {string} version exact published version
+ * @returns {Promise<string>}
+ */
+async function tarballUrlOf(registry, version) {
+  const base = String(registry ?? "").trim() || DEFAULT_REGISTRY;
+  const construct = () =>
+    new URL(
+      `${PACKAGE_NAME}/-/${PACKAGE_NAME}-${version}.tgz`,
+      base.endsWith("/") ? base : `${base}/`,
+    ).href;
+  if (typeof fetch !== "function") return construct();
+  try {
+    const url = new URL(PACKAGE_NAME, base.endsWith("/") ? base : `${base}/`)
+      .href;
+    const response = await fetch(url, {
+      headers: { accept: "application/vnd.npm.install-v1+json" },
+      signal: AbortSignal.timeout(LOOKUP_TIMEOUT_MS),
+    });
+    if (!response.ok) return construct();
+    const meta = await response.json();
+    const tarball = meta?.versions?.[version]?.dist?.tarball;
+    return typeof tarball === "string" && tarball !== "" ? tarball : construct();
+  } catch {
+    return construct();
+  }
 }
 
 /**
@@ -4295,20 +4358,20 @@ export function apply(ctx, config = {}) {
    * Install the newest published version, through the same service the Plugins
    * page uses.
    *
-   * The exact version is passed, never a range. That matters twice over:
-   * `pnpm add <name>@<version>` is what REWRITES the profile's declared range to
-   * `^<version>` (a stale `^0.0.1` can never resolve `0.1.0`, which is the whole
-   * reason a fresh release used to install nothing), and a pinned version keeps
-   * the resolver from having to pick one out of a moving range.
+   * The exact version is passed, never a range. The spec it installs FROM
+   * depends on what is already on disk (see the comment at the choice below):
+   * an update goes through the new version's tarball URL — the spec shape the
+   * HMR precheck cannot refuse — and a fresh install keeps the plain
+   * `name@version`, whose install rewrites the profile's declared range.
    *
-   * Pinning buys nothing from the 24h `minimumReleaseAge` policy: the install
-   * has to record the release in the workspace's `minimumReleaseAgeExclude`
-   * first (this profile has carried both a `dsh-waifu-agents@0.2.0` and a
-   * `dsh-waifu-agents@0.2.1` entry ever since those installs), and with no
-   * entry covering it the lockfile check refuses the install outright with
-   * `ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION`. So a fresh release can still be
-   * held back here for up to 24h; surface that failure rather than promising a
-   * bypass.
+   * `minimumReleaseAge`: a registry-name install is subject to the 24h
+   * freshness policy and must be recorded in the workspace's
+   * `minimumReleaseAgeExclude` first, or the lockfile check refuses outright
+   * with `ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION`. A tarball URL install
+   * fetches the package file directly and plausibly never consults publish
+   * times — expected but NOT verified against the manager's pnpm invocation,
+   * so the failure, should it come, is surfaced verbatim rather than promised
+   * away.
    *
    * Returns as soon as the install is STARTED, not when it finishes, and hands
    * back the `requestId` that makes the platform publish progress for it. The
@@ -4376,6 +4439,25 @@ export function apply(ctx, config = {}) {
       };
     }
     /*
+     * Which spec to install from, decided by what is already on disk.
+     *
+     * An UPDATE of an installed package installs from the new version's
+     * tarball URL: that is the one spec shape the HMR precheck cannot match by
+     * name, so it reaches pnpm over the installed copy and the re-composition
+     * replaces the running plugin in place — no removal, no fiber gamble. It
+     * also rewrites the profile's saved dependency from a version range to the
+     * exact URL, which is deliberate: the next update's URL differs again, so
+     * no future install is ever refused as already-installed.
+     *
+     * A FRESH install (nothing readable on disk) keeps the registry name:
+     * there is nothing installed for the precheck to refuse, and the saved
+     * spec stays a plain dependency. If that judgement is wrong — the copy on
+     * disk was unreadable, not absent — the name spec is refused with
+     * `already-installed` and the two-step below takes over.
+     */
+    let spec = `${PACKAGE_NAME}@${version}`;
+    if (before !== null) spec = await tarballUrlOf(config.registry, version);
+    /*
      * The id is minted here, or accepted from the panel when it sent one. It
      * exists because the platform publishes progress ONLY for an installation
      * that carries one (`noteInstallState`). The panel prefers to mint it
@@ -4411,25 +4493,92 @@ export function apply(ctx, config = {}) {
      */
     void (async () => {
       try {
-        const outcome = await manager.installBundle(
-          `${PACKAGE_NAME}@${version}`,
-          { enabled: true, requestId },
-        );
-        job.done = true;
+        const outcome = await manager.installBundle(spec, {
+          enabled: true,
+          requestId,
+        });
         if (outcome?.application === "failed") {
+          /*
+           * The tarball spec should never be refused with `already-installed`
+           * (its package name is only known after pnpm runs), and a fresh
+           * install has nothing installed to refuse. Landing here anyway
+           * means the manager named the installed package from the spec
+           * after all, or the disk judgement above was wrong — either way the
+           * documented cross-version path is remove-then-install, and the
+           * fiber that awaited the removal is never interrupted by the
+           * resolution itself, so this fallback performs the two-step right
+           * here: remove, then install the new version from the same fiber
+           * under its plain registry name. Whether the host lets the fiber
+           * survive its own removal is what real-machine use finds out; every
+           * way it can die is caught below and reported with the manual path
+           * as the last resort. Nothing here can touch user data — personas
+           * and teams.json are outside the package.
+           */
+          const code = String(outcome.error?.code ?? outcome.error?.message ?? "");
+          if (code.includes("already-installed")) {
+            ctx.logger?.warn?.(
+              `dsh-waifu-agents: installBundle refused ${version} (already-installed); performing remove-then-install.`,
+            );
+            job.phase = "removing";
+            try {
+              await manager.removeBundle(PACKAGE_NAME);
+            } catch (removeFailure) {
+              job.done = true;
+              job.error = `卸载旧版本失败（${removeFailure?.message ?? removeFailure}），已安装的版本没有变动。请到「插件」页手动卸载后重新安装 ${version}。`;
+              return;
+            }
+            /*
+             * Still running — the fiber survived its own removal. The spec no
+             * longer names an installed package, so the precheck lets the new
+             * version through to pnpm.
+             */
+            job.phase = "reinstalling";
+            let retry = null;
+            try {
+              retry = await manager.installBundle(`${PACKAGE_NAME}@${version}`, {
+                enabled: true,
+                requestId,
+              });
+            } catch (installFailure) {
+              job.done = true;
+              job.error = `旧版本已卸载，但安装 ${version} 失败：${installFailure?.message ?? installFailure}。请到「插件」页重新安装——人设目录（personas）和团队配置（teams.json）不在包里，不受影响。`;
+              return;
+            }
+            if (retry?.application === "failed") {
+              job.done = true;
+              job.error = `旧版本已卸载，但安装 ${version} 失败：${retry.error?.message ?? retry.error?.code ?? JSON.stringify(retry.error)}。请到「插件」页重新安装——人设目录（personas）和团队配置（teams.json）不在包里，不受影响。`;
+              if (job.log === "") job.log = String(retry?.packageResult?.output ?? "");
+              return;
+            }
+            job.done = true;
+            job.result = {
+              ok: true,
+              version,
+              previous: before,
+              application: retry?.application ?? null,
+              changed: retry?.changed === true,
+              installed: readOwnVersion(),
+              log: String(retry?.packageResult?.output ?? ""),
+              twoStep: true,
+            };
+            return;
+          }
+          job.done = true;
           job.error = `安装失败：${outcome.error?.message ?? outcome.error?.code ?? JSON.stringify(outcome.error)}`;
           // The manager's own transcript is the useful half of this failure,
           // and it is only here if the streaming feed never spoke.
           if (job.log === "") job.log = String(outcome?.packageResult?.output ?? "");
           return;
         }
+        job.done = true;
         job.result = {
           ok: true,
           version,
           previous: before,
-          // The manager never hot-swaps an already-installed package, so this
-          // is `restart-required` in practice. Its own word is passed through
-          // rather than a promise this code cannot keep.
+          // Without HMR this is `restart-required`; with HMR a fresh install
+          // (the two-step above included) may genuinely apply. The manager's
+          // own word is passed through rather than a promise this code cannot
+          // keep.
           application: outcome?.application ?? null,
           changed: outcome?.changed === true,
           installed: readOwnVersion(),
