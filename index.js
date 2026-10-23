@@ -2,10 +2,10 @@
  * dsh-waifu-agents — Host half.
  *
  * Scans one persona directory and registers every `*.md` in it as an agent
- * preset ("wife"). All presets share one capability list (`template.json`,
- * 20 rows); only the `@deepseek-ai/dsh-persona` row's `prefix` is replaced by
- * the file's markdown body, so the persona text lives in plain files while the
- * tool set comes from one place.
+ * preset ("wife"). All presets share one capability list (`template.json`);
+ * only the `@deepseek-ai/dsh-persona` row's `prefix` is replaced by the file's
+ * markdown body, so the persona text lives in plain files while the tool set
+ * comes from one place.
  *
  * Identity is the **id** (the file name), never the display name: `rename`
  * moves the file and re-registers it under the new id. `order` is assigned by
@@ -924,6 +924,17 @@ export function apply(ctx, config = {}) {
   const foreign = new Set();
 
   /**
+   * Ids a previous instance of THIS plugin still holds (hot-reload ghosts).
+   *
+   * `foreign` means "occupied, occupier unknown"; `ghosts` narrows it to
+   * "occupied, and the occupier is provably us" — the panel words those two
+   * differently, because the remedy differs: a stranger means rename the
+   * file, a ghost means restart DSH (the stale registration lives inside the
+   * previous instance and there is no API to reach it).
+   */
+  const ghosts = new Set();
+
+  /**
    * Has one scan finished with a readable roster?
    *
    * Until it has, `owned` is empty because nothing has been registered YET — not
@@ -1016,19 +1027,12 @@ export function apply(ctx, config = {}) {
    * Write one persona file so that what sits on disk is never half of either
    * version: stage beside the target, then `rename` over it. This repository
    * already seeds directories that way (`seedInto`) and for the same reason —
-   * `rename` is atomic, a partially written file is not.
-   *
-   * The previous version is kept as `<name>.bak`: the optimistic lock can tell
-   * you that something changed, but it cannot give back what it replaced.
+   * `rename` is atomic, a partially written file is not. No `.bak` is kept:
+   * the optimistic lock (readPersona fingerprints the live file before each
+   * save) already refuses to clobber an externally-changed file, and a staged
+   * rename leaves no half-written state to recover from.
    */
   function writeAtomic(full, text) {
-    if (fs.existsSync(full)) {
-      try {
-        fs.copyFileSync(full, `${full}.bak`);
-      } catch {
-        // A backup that cannot be taken must not block the write itself.
-      }
-    }
     const stage = `${full}.stage-${process.pid}-${Date.now()}`;
     try {
       fs.writeFileSync(stage, text, "utf8");
@@ -2199,6 +2203,8 @@ export function apply(ctx, config = {}) {
         owned: scannedOnce !== true || owned.has(id) || registering.has(id),
         /* Whether a REAL conflict was observed: only `scan` can know that. */
         foreign: foreign.has(id),
+        /* Whether the occupier is provably a previous instance of this plugin. */
+        ghost: ghosts.has(id),
         mtimeMs: parsed.mtimeMs,
         size: parsed.size,
       });
@@ -2225,6 +2231,12 @@ export function apply(ctx, config = {}) {
      * about a second location.
      */
     runLogFile: path.join(path.dirname(overrideFile), RUN_LOG_FILE),
+    /*
+     * Team memory lives beside them too: one JSON file per session, owned by
+     * this plugin, wiped by the panel's clear op. A falsy value would disable
+     * memory entirely — reserved for hosts without a home directory.
+     */
+    memoryDir: path.join(path.dirname(overrideFile), "team-memory"),
     roster: listFiles,
     personaTextOf: safeText,
     /*
@@ -2523,29 +2535,39 @@ export function apply(ctx, config = {}) {
   }
 
   /**
-   * Does this roster row carry OUR fingerprint?
+   * Is the occupier of this id a previous instance of this plugin?
    *
-   * Both persona presets and team presets are registered through
-   * `buildDefinition`, whose `plugins` rows include `@deepseek-ai/dsh-persona`
-   * rewritten with `PERSONA_PLACEHOLDER` as the prefix — a combination nothing
-   * else registers. A roster row matching it is this plugin's own previous
-   * instance, not a foreign owner.
+   * Written after reading the platform source (`dsh-agent-preset-registry`),
+   * which killed the previous reclaim design twice over:
    *
-   * The shape of `agentPresets.list()` rows is NOT promised to include the
-   * registered `plugins` array; if it does not, this answers `false` and the
-   * scan reports the conflict exactly as it did before — the fingerprint is
-   * only ever evidence FOR a reclaim, never against a row.
-   * @param {unknown} row - one entry of `ctx.agentPresets.list()`
-   * @returns {boolean}
+   *  - `list()` rows carry only `id/name/description/order/broken` — the
+   *    registered `plugins` array is NOT exposed, so a roster-row fingerprint
+   *    could never fire;
+   *  - `register()` throws `Duplicate agent preset` on an occupied id — it
+   *    never upserts, and the ghost's disposer is held by the dead previous
+   *    instance. There is no remove-by-id API, so there is nothing to
+   *    re-register over: the only cure for a ghost is a restart.
+   *
+   * The one readable fingerprint is `readDocument(id)`, the composition YAML
+   * behind the declaration: our definitions embed the persona plugin row
+   * (`@deepseek-ai/dsh-persona`) rewritten with `PERSONA_PLACEHOLDER` as the
+   * prefix — a combination nothing else registers. Feature-detected: the
+   * service surface is not contractually promised to expose it.
+   *
+   * @param {string} id
+   * @returns {Promise<string | null>} the panel note when provably ours, else null
    */
-  function isOwnPresetShape(row) {
-    const plugins = row?.plugins;
-    if (!Array.isArray(plugins)) return false;
-    return plugins.some(
-      (plugin) =>
-        plugin?.name === "@deepseek-ai/dsh-persona" &&
-        plugin?.config?.prefix === PERSONA_PLACEHOLDER,
-    );
+  async function ownGhostNote(id) {
+    try {
+      if (typeof ctx.agentPresets?.readDocument !== "function") return null;
+      const doc = await ctx.agentPresets.readDocument(id);
+      const text = typeof doc === "string" ? doc : String(doc ?? "");
+      if (!text.includes("@deepseek-ai/dsh-persona")) return null;
+      if (!text.includes(PERSONA_PLACEHOLDER)) return null;
+      return "本插件旧实例的残留注册（插件文件在运行中被替换后热重载留下），刷新清不掉——重启 DSH 即清除";
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -2565,6 +2587,7 @@ export function apply(ctx, config = {}) {
      * entry would be a lie that survives a fix.
      */
     foreign.clear();
+    ghosts.clear();
     const roster = new Map();
     try {
       for (const preset of await ctx.agentPresets.list())
@@ -2625,30 +2648,18 @@ export function apply(ctx, config = {}) {
          */
         if (registering.has(item.id)) continue;
         /*
-         * Ghost reclaim. Within one DSH process, an uninstall leaves the
-         * preset table holding this plugin's old entries (observed on a
-         * remove-then-reinstall with HMR: every row read 「被别的所有者占用」
-         * until a restart cleared the table). Such a ghost is not another
-         * owner — it is OUR previous instance, and it carries our fingerprint:
-         * only this plugin registers presets whose plugins rows contain
-         * `@deepseek-ai/dsh-persona` with our placeholder as the prefix.
-         * Re-registering over it is therefore reclaiming, not stealing — and
-         * if the registry refuses the duplicate, the catch falls through to
-         * the same foreign report as before, so the attempt cannot make
-         * anything worse.
+         * Occupied, and not by anything we registered in THIS instance. The
+         * platform refuses duplicate registration (never upserts) and offers
+         * no removal API, so there is nothing safe to attempt — the scan's
+         * whole job is to say WHO holds it: a hot-reload ghost of ours
+         * (restart clears it) or a genuine stranger (rename the file).
          */
-        if (isOwnPresetShape(roster.get(item.id))) {
-          holdRegistration(item.id);
-          try {
-            await registerOne(item.id, parsed.meta, parsed.body);
-            added.push(item.id);
-            continue;
-          } catch {
-            // The registry refused the overwrite: report the conflict below,
-            // exactly as if no reclaim had been attempted.
-          } finally {
-            releaseRegistration(item.id);
-          }
+        const ghostNote = await ownGhostNote(item.id);
+        if (ghostNote !== null) {
+          ghosts.add(item.id);
+          foreign.add(item.id);
+          skipped.push({ id: item.id, reason: ghostNote });
+          continue;
         }
         foreign.add(item.id);
         skipped.push({ id: item.id, reason: "已经有人注册了这个 id" });
@@ -5092,6 +5103,22 @@ export function apply(ctx, config = {}) {
   }
 
   /**
+   * Wipe every session's team memory (the panel's 「清空团队记忆」).
+   *
+   * Deliberately all-of-it, not per-session: the panel does not know session
+   * ids, and memory without its session is unreadable clutter anyway. The
+   * personas, teams.json and the ledger are untouched — this clears plot
+   * recall, nothing else.
+   */
+  async function teamMemoryClear() {
+    if (teamRuntime === null || typeof teamRuntime.clearMemory !== "function") {
+      return { ok: false, error: "团队运行时未就绪。" };
+    }
+    const removed = await teamRuntime.clearMemory();
+    return { ok: true, removed };
+  }
+
+  /**
    * What `/waifu-team`'s picker offers for ONE session.
    *
    * Read-only, and deliberately so: this is the same seam `/waifu-change`'s
@@ -5536,13 +5563,14 @@ export function apply(ctx, config = {}) {
     if (op === "teamState") return teamState();
     if (op === "teamSet") return teamSet(request);
     if (op === "teamPick") return teamPick(request);
+    if (op === "teamMemoryClear") return teamMemoryClear();
     if (op === "updateCheck") return updateCheck();
     if (op === "updateApply") return updateApply(request);
     if (op === "updateProgress") return updateProgress(request);
     if (op === "purge") return purge(request);
     return {
       ok: false,
-      error: `未知的 op：${op}（可用：list / get / refresh / create / update / rename / remove / hidden / restore / batch / search / skeleton / setSkeleton / import / export / exportAll / template / setDir / setDefault / roster / waifuState / waifuApply / waifuClear / waifuOrder / updateCheck / updateApply / updateProgress / purge）`,
+      error: `未知的 op：${op}（可用：list / get / refresh / create / update / rename / remove / hidden / restore / batch / search / skeleton / setSkeleton / import / export / exportAll / template / setDir / setDefault / roster / waifuState / waifuApply / waifuClear / waifuOrder / teamState / teamSet / teamPick / teamMemoryClear / updateCheck / updateApply / updateProgress / purge）`,
     };
   }
 

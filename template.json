@@ -16,6 +16,10 @@
     }
   },
   {
+    "id": "time-context",
+    "name": "@deepseek-ai/dsh-time-context"
+  },
+  {
     "id": "tool-bash",
     "name": "@deepseek-ai/dsh-tool-bash",
     "disabled": {
@@ -43,6 +47,10 @@
   {
     "id": "tool-jobs",
     "name": "@deepseek-ai/dsh-tool-jobs"
+  },
+  {
+    "id": "tool-schedule",
+    "name": "@deepseek-ai/dsh-tool-schedule"
   },
   {
     "id": "command-goal",

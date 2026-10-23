@@ -143,6 +143,16 @@ export function snapshotOf({
       name: text(team?.name),
       backgroundChars: background.length,
       backgroundHash: shortHash(background),
+      /** Whether this team carries memory across rounds (a scalar, not a body). */
+      memory: team?.memory !== false,
+      /** Retention in idle days (0 = keep forever); adoptTeam already normalized it. */
+      memoryTtlDays:
+        Number.isFinite(Number(team?.memoryTtlDays)) && Number(team?.memoryTtlDays) >= 0
+          ? Math.floor(Number(team?.memoryTtlDays))
+          : 7,
+      /** Per-team size cap (null = follows the store-wide maxTeamSize). */
+      maxMembers:
+        Number.isSafeInteger(team?.maxMembers) && team.maxMembers >= 2 ? team.maxMembers : null,
       /*
        * Roles are per-member labels written on the team, not on the persona, so
        * they can change without a single persona file moving. An ordered array

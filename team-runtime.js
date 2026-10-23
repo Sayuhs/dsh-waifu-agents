@@ -88,8 +88,22 @@ import {
   turnBudget,
 } from "./team-simulate.js";
 import { exportSnapshot, snapshotOf } from "./team-snapshot.js";
+import {
+  MEMORY_SUMMARY_CHARS,
+  MEMORY_WINDOW_CHARS,
+  appendRound,
+  applySummary,
+  emptyMemory,
+  memoryTtlMsFromDays,
+  readMemory,
+  renderMemoryBlock,
+  summaryPrompt,
+  trimBacklog,
+  writeMemory,
+} from "./team-memory.js";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
+import path from "node:path";
 
 /**
  * Failure classes worth a second request, and how many attempts to spend.
@@ -593,11 +607,80 @@ export function installTeamRuntime(ctx, deps) {
    */
   const simulationCalls = new WeakSet();
 
+  /**
+   * Per-session team memory, cached in front of the disk file.
+   *
+   * The cache IS the source of truth while the process lives: a round is
+   * appended to the cached object the moment its stream settles, and the disk
+   * write follows fire-and-forget. That ordering is what keeps the very next
+   * round from reading a memory that is one round behind — the user's next
+   * message can beat a slow disk write, and it must still see the round that
+   * just finished.
+   */
+  const memoryCache = new Map();
+
   function pruneRuns() {
     const now = Date.now();
     for (const [key, run] of [...runs.entries()]) {
       if (run.terminal === true && now - run.finishedAt > RUN_WINDOW_MS) runs.delete(key);
     }
+  }
+
+  /**
+   * Fold evicted rounds into the session summary — the lazy half of memory.
+   *
+   * Called at the START of a round whose memory still carries a backlog, so
+   * the call runs inside a live fiber with real error handling instead of a
+   * fire-and-forget after the reply closed. `null` means the fold did not
+   * happen (the backlog stays put and the round proceeds without it): an
+   * LLM outage must not become a memory outage, and it must not block the
+   * turn the user actually asked for.
+   *
+   * The request is marked in `simulationCalls` before `llm.stream`, exactly
+   * like the main call — the `llm/stream` waterfall sees every stream in the
+   * process and must recognise this one as our own re-entry.
+   *
+   * @returns {Promise<string|null>} the folded text, or null on failure
+   */
+  async function foldSummary(llm, { options, budget, oldSummary, batch }) {
+    const request = {
+      provider: options?.provider,
+      model: options?.model,
+      messages: [
+        {
+          id: randomUUID(),
+          role: "user",
+          content: [{ type: "text", text: summaryPrompt({ oldSummary, batch }) }],
+          source: { kind: "user" },
+        },
+      ],
+      maxTokens: budget,
+    };
+    simulationCalls.add(request);
+    const attempts = RETRY_DELAYS_MS.length + 1;
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      try {
+        let text = "";
+        for await (const chunk of llm.stream(request)) {
+          if (chunk?.type === "text-delta" && typeof chunk.text === "string") text += chunk.text;
+          else if (chunk?.type === "block-end" && chunk.block?.type === "text" && text === "") {
+            text = String(chunk.block.text ?? "");
+          }
+        }
+        if (text.trim() === "") {
+          throw Object.assign(new Error("梗概调用返回了空内容"), { code: "EMPTY_RESPONSE" });
+        }
+        return text;
+      } catch (error) {
+        const code = String(error?.code ?? error?.failureCode ?? "");
+        if (attempt < attempts && RETRYABLE_FAILURES.includes(code)) {
+          await new Promise((resolve) => setTimeout(resolve, RETRY_DELAYS_MS[attempt - 1]));
+          continue;
+        }
+        return null;
+      }
+    }
+    return null;
   }
 
   /**
@@ -894,6 +977,19 @@ export function installTeamRuntime(ctx, deps) {
     let wrote = 0;
 
     /*
+     * Team memory, declared outside the `try` for the same TDZ reason as
+     * `finishKind` above: the `finally` records the round into memory and
+     * needs these even on a path that threw. `mem` stays `null` when memory
+     * is off for this team or no directory was wired — every consumer below
+     * null-checks it, so "off" costs nothing but the boolean.
+     */
+    let mem = null;
+    let memBlock = "";
+    let memoryOn = false;
+    let memKey = "";
+    let finalRaw = "";
+
+    /*
      * The thinking chain, forwarded as a native reasoning block (§8 reasoning).
      *
      * `dsh-llm` 0.2.1 emits the model's reasoning as a first-class streamed
@@ -942,6 +1038,52 @@ export function installTeamRuntime(ctx, deps) {
         const budget = turnBudget(deps.maxTokens);
         run.scale = scale;
         run.maxTokens = budget;
+        /*
+         * Load (or reuse) this session's memory, and settle any fold backlog
+         * left by an earlier eviction — BEFORE the first request is built, so
+         * this round already sees the folded summary. `resolved.team.memory`
+         * is the per-team switch; absent means on (the user-visible default).
+         * A missing `memoryDir` (a selftest host, or a probe with no home)
+         * disables the whole path without a trace.
+         */
+        memoryOn = resolved.team?.memory !== false;
+        const memoryDirOk = typeof deps.memoryDir === "string" && deps.memoryDir !== "";
+        /*
+         * The key is session × team, not session alone: `/waifu-team` can
+         * rebind mid-session, and A 队的剧情 must never leak into B 队的
+         * rounds. Renaming a team therefore starts a fresh memory — the old
+         * file ages out through the retention window instead.
+         */
+        memKey = memoryOn && memoryDirOk ? `${sessionId}::${resolved.team?.name ?? ""}` : "";
+        if (memoryOn && memoryDirOk) {
+          mem = memoryCache.get(memKey);
+          if (mem === undefined) {
+            mem = await readMemory(deps.memoryDir, memKey, {
+            /*
+             * Retention is per team: the panel edits `memoryTtlDays` like the
+             * paging number (0 = keep forever). A finite `deps.memoryTtlMs`
+             * stays the offline override for selftests.
+             */
+            ttlMs:
+              Number.isFinite(deps.memoryTtlMs) && deps.memoryTtlMs > 0
+                ? deps.memoryTtlMs
+                : memoryTtlMsFromDays(resolved.team?.memoryTtlDays),
+          });
+            memoryCache.set(memKey, mem);
+          }
+          if (mem.backlog.length > 0) {
+            const folded = await foldSummary(llm, {
+              options,
+              budget,
+              oldSummary: mem.summary,
+              batch: mem.backlog.join("\n"),
+            });
+            if (folded !== null) applySummary(mem, folded);
+            else trimBacklog(mem);
+          }
+          memBlock = renderMemoryBlock(mem);
+        }
+        run.memChars = memBlock.length;
         const prompt = simulationSystemPrompt({
           team: resolved.team,
           members,
@@ -949,7 +1091,7 @@ export function installTeamRuntime(ctx, deps) {
           task: asked.task,
           scale,
         });
-        let messages = simulationMessages({ prompt, task: asked.task });
+        let messages = simulationMessages({ prompt, task: asked.task, memory: memBlock });
         /*
          * The baseline half of the ledger: what the request *looked like*,
          * independent of what it cost.
@@ -1344,6 +1486,8 @@ export function installTeamRuntime(ctx, deps) {
              */
             round,
             reason: roundReason,
+            /** Characters of team memory injected ahead of the ask (0 = off). */
+            memChars: memBlock.length,
             durationMs: Date.now() - attemptStartedAt,
             segments: wrote - segmentsBefore,
             rawChars: raw.length,
@@ -1476,6 +1620,13 @@ export function installTeamRuntime(ctx, deps) {
             messages = simulationMessages({
               prompt,
               task: asked.task,
+              /*
+               * Memory rides every request of the run, continuations included:
+               * a ceiling retry that dropped it would let the model "forget"
+               * the previous rounds mid-turn — the exact failure memory exists
+               * to prevent, reintroduced one continuation later.
+               */
+              memory: memBlock,
               transcript,
               /*
                * Both kinds of follow-up need the missing names now: a ceiling
@@ -1492,6 +1643,12 @@ export function installTeamRuntime(ctx, deps) {
             break;
           }
 
+          /*
+           * The run is terminal here — every continuation path `continue`d
+           * above. Freeze what the room actually said (accumulated across
+           * continuations) so `finally` can hand it to memory.
+           */
+          finalRaw = transcript === "" ? raw : `${transcript}\n${raw}`;
           const status = settle(verdict);
           /*
            * Coverage is measured on **every** terminal state, not only a clean
@@ -1685,6 +1842,8 @@ export function installTeamRuntime(ctx, deps) {
           requestShape: run.requestShape,
           promptChars: run.promptChars,
           taskChars: run.taskChars,
+          /** Characters of team memory injected this run (0 = memory off). */
+          memChars: typeof run.memChars === "number" ? run.memChars : 0,
           /*
            * The scale class and the ceiling it produced (A + B). `scale` is the
            * verdict `classifyTurn` made; `maxTokens` is the number that actually
@@ -1737,6 +1896,30 @@ export function installTeamRuntime(ctx, deps) {
          * trigger falls through to a real model call. The outer `finally`
          * clears it once the reply is actually finished.
          */
+        /*
+         * Memory recording, last of all. A round that said nothing records
+         * nothing (`finalRaw === ""` covers no-service, empty replies and a
+         * cancel during backoff alike); a round that was cut mid-sentence
+         * still happened on screen, so it is remembered as what it was —
+         * including the cut. The fold that the eviction might now owe is
+         * taken at the START of the next round (`foldSummary` there), which
+         * keeps this finally free of model calls.
+         */
+        if (mem !== null && finalRaw !== "") {
+          const evicted = appendRound(
+            mem,
+            { input: typeof asked.task === "string" ? asked.task : "", output: finalRaw },
+            Number.isFinite(deps.memoryWindowChars) ? deps.memoryWindowChars : MEMORY_WINDOW_CHARS,
+          );
+          if (evicted !== "") {
+            mem.backlog.push(evicted);
+            trimBacklog(mem);
+          }
+          mem.updatedAt = Date.now();
+          writeMemory(deps.memoryDir, memKey, mem).catch((error) => {
+            warn(`写团队记忆失败：${error?.message ?? error}`);
+          });
+        }
       }
     })();
     // `work` cannot reject — every path above is caught or in `finally` — but the
@@ -2240,10 +2423,47 @@ export function installTeamRuntime(ctx, deps) {
       if (id === "") {
         bound.clear();
         off.clear();
+        memoryCache.clear();
         return;
       }
       bound.delete(id);
       off.delete(id);
+      /*
+       * Cache keys are session × team (see `memKey`), so the unbind cannot
+       * name one — drop every team's cached memory for this session. The
+       * disk files stay; a rebind reads them back through `readMemory`.
+       */
+      for (const key of [...memoryCache.keys()]) {
+        if (key.startsWith(`${id}::`)) memoryCache.delete(key);
+      }
+    },
+    /**
+     * Forget every session's team memory — the panel's 「清空团队记忆」.
+     *
+     * Cache first (a cleared disk under a live cache would resurrect the
+     * rounds on the next read), then every `.json` in the memory directory.
+     * @returns {Promise<number>} how many files were removed.
+     */
+    async clearMemory() {
+      memoryCache.clear();
+      if (typeof deps.memoryDir !== "string" || deps.memoryDir === "") return 0;
+      let removed = 0;
+      let entries = [];
+      try {
+        entries = await fs.promises.readdir(deps.memoryDir);
+      } catch {
+        return 0;
+      }
+      for (const name of entries) {
+        if (!name.endsWith(".json")) continue;
+        try {
+          await fs.promises.rm(path.join(deps.memoryDir, name), { force: true });
+          removed += 1;
+        } catch {
+          /* one stubborn file must not stop the rest */
+        }
+      }
+      return removed;
     },
     /** Exposed for the selftest, so the recursion guard is drivable offline. */
     isDelegated,
@@ -2270,6 +2490,8 @@ export function installTeamRuntime(ctx, deps) {
       /** The reply's scale class and the token ceiling it produced. */
       scale: run.scale,
       maxTokens: run.maxTokens,
+      /** Characters of team memory injected this run. */
+      memChars: typeof run.memChars === "number" ? run.memChars : 0,
       /** Progress phase and first-token latency (C). */
       phase: run.phase,
       firstTokenMs: run.firstTokenMs,

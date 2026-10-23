@@ -204,6 +204,7 @@ window.__ModuleLoader__.load({
         problems: '这一篇现在没法注册',
         notRegistered: '未注册',
         takenByOther: '这个 id 被别的所有者占用了',
+        takenByGhost: '本插件旧实例的残留注册（热重载留下），刷新清不掉——重启 DSH 即清除',
         notRegisteredRetry: '没注册上，点「刷新」重试',
         activationFailed: '激活失败',
         loading: '读取中…',
@@ -326,7 +327,6 @@ window.__ModuleLoader__.load({
         teamCapTruncate: '超出取前几个',
         teamReload: '重新读文件',
         teamReloaded: '已重新读文件并重新注册',
-        teamBindNote: '上线/下线是会话级的，面板改不了它——用 /waifu-team。',
         teamPresetNote: '每个团队也是一个预设，会出现在新建会话时的模式列表里；选了它，这个会话一出生就在团队模式。',
         /* The team row's default switch. Same field as the persona rows
            (`selectedDefault`), so the tooltip has to say 「二选一」 out loud —
@@ -341,6 +341,18 @@ window.__ModuleLoader__.load({
         teamStaleHint: '这些已经选不上，但还占着队伍名额。删掉或者改回目录里有的名字。',
         teamUnitGone: '已失效',
         teamCapPolicyHint: '上限 3 却点到 5 个人时：「超出就不跑」= 这一轮整队不跑；「超出取前几个」= 只留名单里靠前的 3 个，其余跳过并点名。',
+        teamMemory: '剧情记忆',
+        teamMaxMembers: '本队人数上限',
+        teamMaxMembersHint: '只管这一队，压过全局的「人数上限」设置。留空 = 跟随全局；填 ≥ 2 的整数，超限按全局的「超限怎么办」处理。',
+        teamMaxMembersGlobal: '跟随全局',
+        teamMemoryHint: '这一轮记得之前几轮：最近的场次逐字带、更早的压成梗概。记忆按「会话 × 队伍」存：只在这一场里积累，新会话从零开始，中途换队也不串剧情。保留多久在下面那行自己填（填 0 = 永久保留）。关掉则回到每轮无记忆、成本恒定的旧形态。',
+        teamMemoryKeep: '记忆保留（天）',
+        teamMemoryKeepHint: '超过这么多天没续上的记忆，下次读到时自动清除、当新会话处理。填 0 = 永久保留，直到用下面的「强制清空」手动删。默认 7。',
+        teamMemoryClear: '强制清空记忆',
+        teamMemoryClearHint: '不分保留期、立刻删掉所有会话的剧情记忆文件（梗概+场次），删了找不回来。人设、团队配置、账本不受影响。',
+        teamMemoryClearBtn: '清空',
+        teamMemoryClearAsk: '删除所有会话的团队剧情记忆？这是全量清除，删了找不回来。人设和团队配置不受影响。',
+        teamMemoryCleared: '已清空团队记忆（{n} 个文件）。',
         teamEditingNew: '新建团队',
         teamEditingOne: '编辑团队',
       },
@@ -455,6 +467,7 @@ window.__ModuleLoader__.load({
         problems: 'She cannot be registered right now',
         notRegistered: 'not registered',
         takenByOther: 'another owner holds this id',
+        takenByGhost: "a leftover registration from this plugin's previous instance (hot reload) — refresh cannot clear it; restart DSH",
         notRegisteredRetry: 'registration did not land — press Refresh',
         activationFailed: 'activation failed',
         loading: 'Loading…',
@@ -571,7 +584,6 @@ window.__ModuleLoader__.load({
         teamCapTruncate: 'keep the first few',
         teamReload: 're-read the file',
         teamReloaded: 're-read and re-registered',
-        teamBindNote: 'going on/off duty is per-session; this panel cannot set it — use /waifu-team.',
         teamPresetNote: 'every team is also a preset, so it shows up in the mode list when a session is created — pick it there and the session is born in team mode.',
         teamDefaultTitle: 'make this team the default for new sessions (this clears the persona default — the platform has one slot)',
         teamDefaultSet: 'Default team is now "{name}"',
@@ -583,6 +595,18 @@ window.__ModuleLoader__.load({
         teamStaleHint: 'these can no longer be picked but still hold a slot. Drop them, or rename them back to something the directory has.',
         teamUnitGone: 'unresolvable',
         teamCapPolicyHint: 'cap 3 but 5 were named: "skip the run" drops the whole team this turn; "keep the first few" takes the first 3 in listed order, skips the rest and names them.',
+        teamMemory: 'plot memory',
+        teamMaxMembers: 'this team\'s size cap',
+        teamMaxMembersHint: 'caps THIS team only, overriding the global "size cap". Blank = follow the global setting; enter an integer ≥ 2. When over the cap, the global "when over the cap" policy applies.',
+        teamMaxMembersGlobal: 'follow global',
+        teamMemoryHint: 'this round remembers the previous ones: recent rounds verbatim, older ones folded into a summary. Memory is keyed to a session AND a team: it builds up within one session, a new session starts blank, and switching teams mid-session never bleeds plot across. Set how long it is kept in the row below (0 = keep forever). Off returns to the old stateless-per-round mode at constant cost.',
+        teamMemoryKeep: 'memory retention (days)',
+        teamMemoryKeepHint: 'memory idle for more than this many days is cleared on sight and the session starts fresh. 0 = keep forever, until the force-clear below removes it by hand. Default 7.',
+        teamMemoryClear: 'force-clear memory',
+        teamMemoryClearHint: 'deletes every session\'s plot-memory files (summary + rounds) right now, regardless of retention — gone for good. Personas, team config and the ledger are untouched.',
+        teamMemoryClearBtn: 'clear',
+        teamMemoryClearAsk: 'Delete the plot memory of every session? This is a full wipe and cannot be undone. Personas and team config are unaffected.',
+        teamMemoryCleared: 'Team memory cleared ({n} files).',
         teamEditingNew: 'new team',
         teamEditingOne: 'editing team',
       },
@@ -1951,7 +1975,7 @@ window.__ModuleLoader__.load({
             ? h(
                 'span',
                 { style: L.error },
-                `${t('notRegistered')} · ${item.foreign === true ? t('takenByOther') : t('notRegisteredRetry')}`,
+                `${t('notRegistered')} · ${item.ghost === true ? t('takenByGhost') : item.foreign === true ? t('takenByOther') : t('notRegisteredRetry')}`,
               )
             : null,
           broken !== null && broken !== undefined ? h('span', { style: L.error }, `${t('activationFailed')}: ${broken}`) : null,
@@ -2221,6 +2245,52 @@ window.__ModuleLoader__.load({
             onChange: (event) => onPatch({ background: event.target.value }),
           }),
         ),
+        /* Per-team size cap. Empty = follow the store-wide setting; a number
+           ≥ 2 caps this team only. The parser reads the same field, so the
+           editor and the resolve path cannot disagree about it. */
+        h(
+          SettingRow,
+          { title: t('teamMaxMembers'), hint: t('teamMaxMembersHint') },
+          h('input', {
+            type: 'number',
+            min: 2,
+            placeholder: t('teamMaxMembersGlobal'),
+            style: { ...L.input, width: '72px' },
+            disabled: busy,
+            value: draft.maxMembers ?? '',
+            onChange: (event) => onPatch({ maxMembers: event.target.value === '' ? null : Number(event.target.value) }),
+          }),
+        ),
+        /* Per-team memory switch. Absent means on, and the switch mirrors
+           that: `draft.memory !== false`. Turning it off puts THIS team back
+           on the stateless per-round shape (each round constant-cost); the
+           memory itself is per session and cleared from the toolbar. */
+        h(
+          SettingRow,
+          { title: t('teamMemory'), hint: t('teamMemoryHint') },
+          h(SwitchBox, {
+            checked: draft.memory !== false,
+            disabled: busy,
+            onChange: (next) => onPatch({ memory: next === true }),
+          }),
+        ),
+        /* Retention days, editable like the paging number. Shown only while
+           memory is on — with memory off the number has nothing to govern.
+           `?? 7` covers a brand-new draft that has never been patched. */
+        draft.memory !== false
+          ? h(
+              SettingRow,
+              { title: t('teamMemoryKeep'), hint: t('teamMemoryKeepHint') },
+              h('input', {
+                type: 'number',
+                min: 0,
+                style: { ...L.input, width: '72px' },
+                disabled: busy,
+                value: draft.memoryTtlDays ?? 7,
+                onChange: (event) => onPatch({ memoryTtlDays: Number(event.target.value) || 0 }),
+              }),
+            )
+          : null,
         h(
           'div',
           { style: L.sectionRow },
@@ -2436,7 +2506,7 @@ window.__ModuleLoader__.load({
      * what happens past the cap — are drawn as ordinary `SettingRow`s, and the
      * directory itself sits between them as content.
      */
-    function TeamTab({ team, t, busy, draft, onOpen, onPatch, onSaveDraft, onCancelDraft, onRemove, onReload, onBatch, onDefault, defaultId, fieldProblem }) {
+    function TeamTab({ team, t, busy, draft, onOpen, onPatch, onSaveDraft, onCancelDraft, onRemove, onReload, onBatch, onClearMemory, onDefault, defaultId, fieldProblem }) {
       const [batch, setBatch] = React.useState(null);
       const loaded = team !== null && team.ok === true;
       const cap = batch === null ? String((loaded ? team.batch.maxTeamSize : null) ?? '') : batch.cap;
@@ -2494,7 +2564,11 @@ window.__ModuleLoader__.load({
             onChange: (value) => setBatch({ cap, policy: value }),
           }),
         ),
-        h('span', { style: L.hint }, t('teamBindNote')),
+        h(
+          SettingRow,
+          { title: t('teamMemoryClear'), hint: t('teamMemoryClearHint') },
+          h(Btn, { variant: 'toolbar', disabled: busy, onClick: onClearMemory }, t('teamMemoryClearBtn')),
+        ),
         h('span', { style: L.hint }, t('teamPresetNote')),
       );
     }
@@ -3282,6 +3356,17 @@ window.__ModuleLoader__.load({
           /* Carried through the editor untouched unless the user edits it: an
              entry opened for a rename must not silently lose its background. */
           background: entry.background ?? '',
+          memory: entry.memory !== false,
+          memoryTtlDays:
+            Number.isFinite(Number(entry.memoryTtlDays)) && Number(entry.memoryTtlDays) >= 0
+              ? Number(entry.memoryTtlDays)
+              : 7,
+          /* Per-team size cap; null = follow the global setting (the input
+             shows empty). A malformed stored value normalizes away here. */
+          maxMembers:
+            Number.isSafeInteger(Number(entry.maxMembers)) && Number(entry.maxMembers) >= 2
+              ? Number(entry.maxMembers)
+              : null,
           selection: entry.selection.map((one) => ({ kind: one.kind, ref: one.ref })),
         });
       }, []);
@@ -3319,7 +3404,16 @@ window.__ModuleLoader__.load({
           action: 'save',
           name,
           original: typeof draft.original === 'string' ? draft.original : '',
-          team: { selection: draft.selection, background: draft.background ?? '' },
+          team: {
+            selection: draft.selection,
+            background: draft.background ?? '',
+            memory: draft.memory !== false,
+            memoryTtlDays: Number(draft.memoryTtlDays) >= 0 && Number.isFinite(Number(draft.memoryTtlDays)) ? Math.floor(Number(draft.memoryTtlDays)) : 7,
+            maxMembers:
+              Number.isSafeInteger(Number(draft.maxMembers)) && Number(draft.maxMembers) >= 2
+                ? Math.floor(Number(draft.maxMembers))
+                : null,
+          },
         });
         if (ok) setTeamDraft(null);
       }, [teamDraft, mutateTeam, setNote, t]);
@@ -3352,6 +3446,29 @@ window.__ModuleLoader__.load({
       const reloadTeams = React.useCallback(async () => {
         await mutateTeam({ action: 'reload' }, () => t('teamReloaded'));
       }, [mutateTeam, t]);
+
+      /**
+       * The team tab's 「清空团队记忆」.
+       *
+       * It is a whole-directory wipe, not per team and not per session — the
+       * panel does not know session ids, and memory without its session is
+       * unreadable clutter. The confirm window exists for the same reason the
+       * unhide one does: "forget the plot" is one click away from "lose the
+       * plot", and the click must be deliberate.
+       */
+      const clearTeamMemory = React.useCallback(async () => {
+        const proceed = window.confirm(t('teamMemoryClearAsk'));
+        if (proceed !== true) return;
+        setTeamBusy(true);
+        try {
+          const payload = await post({ op: 'teamMemoryClear' });
+          setNote({ kind: 'ok', text: t('teamMemoryCleared').replace('{n}', String(payload?.removed ?? 0)) });
+        } catch (failure) {
+          setNote({ kind: 'error', text: String(failure?.message ?? failure) });
+        } finally {
+          setTeamBusy(false);
+        }
+      }, [t, setNote]);
 
       React.useEffect(() => {
         /*
@@ -4456,6 +4573,7 @@ window.__ModuleLoader__.load({
         onRemove: (name) => setDialog({ kind: 'teamRemove', name }),
         onReload: reloadTeams,
         onBatch: batchTeam,
+        onClearMemory: clearTeamMemory,
         /*
          * The default switch, and the value it reads.
          *

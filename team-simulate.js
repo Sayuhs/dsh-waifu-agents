@@ -405,15 +405,27 @@ export function simulationSystemPrompt({ team, members, personaOf, task, scale =
  * @param {object} input
  * @param {string} input.prompt the system prompt
  * @param {string} input.task the user's message
+ * @param {string} [input.memory] what previous rounds said, prebuilt by
+ *   `renderMemoryBlock` — "" when memory is off or empty
  * @param {string} [input.transcript] what the room already said, verbatim
  * @param {ReadonlyArray<string>} [input.silent] members who never spoke
  * @param {"ceiling"|"coverage"} [input.reason] why another request is being made
  * @returns {Array<object>}
  */
-export function simulationMessages({ prompt, task, transcript = "", silent = [], reason = "" }) {
+export function simulationMessages({ prompt, task, memory = "", transcript = "", silent = [], reason = "" }) {
   const said = typeof transcript === "string" ? transcript.trim() : "";
   const missing = Array.isArray(silent) ? silent.filter((one) => typeof one === "string" && one !== "") : [];
+  const past = typeof memory === "string" ? memory.trim() : "";
   let userText = typeof task === "string" ? task : "";
+  if (past !== "") {
+    /*
+     * Memory rides AHEAD of the current ask, always in the same user message.
+     * A separate assistant message is the shape the host cannot mint safely
+     * (see below), and a second user message would make the memory look like
+     * something the user just typed. One block, one boundary line, done.
+     */
+    userText = `${past}\n\n${userText}`;
+  }
   if (said !== "" || missing.length > 0) {
     const parts = ["【用户这一轮说的】", userText];
     if (said !== "") {

@@ -130,6 +130,37 @@ export function adoptStore(parsed) {
 }
 
 /** One team, with every field a reader may rely on present. */
+
+/**
+ * Normalize the retention field: a non-negative integer of days, `0` meaning
+ * "keep forever", anything else the shipped default of 7.
+ * @param {unknown} value
+ */
+function memoryTtlDaysOf(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) return 7;
+  return Math.floor(n);
+}
+
+/**
+ * Normalize the per-team size override: `null` when the team should follow
+ * the store-wide cap, a safe integer ≥ 2 when it caps itself.
+ *
+ * Unlike the global `maxTeamSize` this never refuses a save: the field is an
+ * OVERRIDE, and a malformed one (1, 0, "3 people", 2.5) reads as "no opinion
+ * of its own" — the global setting answers instead. A capacity of 1 still
+ * has no meaning here (`|team| < 2` already is single mode), so it is
+ * normalized away rather than stored to say one thing and do another.
+ * @param {unknown} value
+ * @returns {number|null}
+ */
+function maxMembersOf(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const n = Number(value);
+  if (!Number.isSafeInteger(n) || n < 2) return null;
+  return n;
+}
+
 export function adoptTeam(name, raw) {
   /*
    * `thinking` used to be a per-team scene option ("stage" / "ventriloquist").
@@ -151,6 +182,18 @@ export function adoptTeam(name, raw) {
     // injected into every member's prompt on every run, so a fact like "托尔和
     // 康娜彼此不知道是什么关系" is stated once rather than repeated per task.
     background: oneLine(raw?.background) || "",
+    // Whether this team carries memory across rounds (see `team-memory.js`).
+    // Absent means ON — memory is the default experience; `false` opts a team
+    // back out to the old stateless-per-round shape and its constant cost.
+    memory: raw?.memory !== false,
+    // How many idle days one session's memory survives (0 = keep forever).
+    // The panel edits it like the paging number: any non-negative integer.
+    // Absent or malformed falls back to the shipped default of 7 — the same
+    // default `memoryTtlMsFromDays` applies when the field is missing.
+    memoryTtlDays: memoryTtlDaysOf(raw?.memoryTtlDays),
+    // Per-team size cap overriding the store-wide `maxTeamSize` (null = follow
+    // the global setting). A chat duo stays at 2 while a story team runs 5.
+    maxMembers: maxMembersOf(raw?.maxMembers),
     // Audit only. Execution never reads this — see the module doc.
     lastResolved: Array.isArray(raw?.lastResolved)
       ? raw.lastResolved.map(oneLine).filter((id) => id !== "")
@@ -527,7 +570,17 @@ export function resolveTeam({ team, roster, coordinator, store }) {
     notices.push(`团队「${team.name}」的成员自上次运行后变了（${parts.join("，")}）。`);
   }
 
-  const cap = store?.maxTeamSize ?? null;
+  /*
+   * The cap is per team first, global second: a team that states its own
+   * `maxMembers` overrides `store.maxTeamSize`, and one that does not (the
+   * normalized `null`) follows the store. `adoptTeam` guarantees the shape,
+   * but resolveTeam also runs on definitions rebuilt from older files, so the
+   * guard here repeats the invariant instead of trusting it.
+   */
+  const cap =
+    Number.isSafeInteger(team?.maxMembers) && team.maxMembers >= 2
+      ? team.maxMembers
+      : store?.maxTeamSize ?? null;
   const policy = CAP_POLICIES.includes(store?.groupCapPolicy) ? store.groupCapPolicy : "refuse";
   let members = expanded.members;
   let truncated = [];
@@ -535,7 +588,7 @@ export function resolveTeam({ team, roster, coordinator, store }) {
     if (policy === "refuse") {
       return {
         ok: false,
-        error: `这次解析出 ${members.length} 名成员，超过了配置的上限 ${cap}。收窄一下选择，或者把上限调掉（teams.json 里的 maxTeamSize 设成 null 就是不设限）。完整名单：${members
+        error: `这次解析出 ${members.length} 名成员，超过了上限 ${cap}${Number.isSafeInteger(team?.maxMembers) && team.maxMembers >= 2 ? "（这一队自己设的）" : ""}。收窄一下选择，或者把上限调掉（这一队编辑器里的「本队人数上限」留空就是跟随全局；teams.json 里的 maxTeamSize 设成 null 就是全局不设限）。完整名单：${members
           .map((row) => row.name)
           .join("、")}。`,
         notices,
