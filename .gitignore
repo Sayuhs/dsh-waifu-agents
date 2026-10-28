@@ -22,13 +22,15 @@ Thumbs.db
 # Local only — never uploaded, never packaged.
 #
 # What gets published is what a user installs, and what gets pushed is what a
-# user browses. The offline assertion suite (`selftest-v3.mjs`), the scoring
+# user browses. The offline assertion suites (`selftest-*.mjs`), the scoring
 # harness with its two reference transcripts (`eval-v3.mjs`, `eval/`), and the
 # maintainer's own notes (`MAINTAINER.md`) are useful only here: the plugin
 # imports none of them, so they can live in the working tree without ever being
 # shipped. `npm test` still reads them from disk.
 MAINTAINER.md
 selftest-v3.mjs
+selftest-dual.mjs
+selftest-r5.mjs
 eval-v3.mjs
 eval/
 

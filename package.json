@@ -1,6 +1,6 @@
 {
   "name": "dsh-waifu-agents",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "type": "module",
   "description": "Registers every *.md in a persona directory as an agent preset, and manages them from the Plugins settings page.",
   "license": "MIT",
@@ -12,7 +12,7 @@
     "agent-preset"
   ],
   "scripts": {
-    "test": "node selftest-v3.mjs",
+    "test": "node selftest-v3.mjs && node selftest-dual.mjs && node selftest-r5.mjs",
     "eval": "node eval-v3.mjs"
   },
   "exports": {

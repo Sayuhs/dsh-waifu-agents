@@ -202,10 +202,15 @@ window.__ModuleLoader__.load({
         reload: '重新载入',
         conflict: '磁盘上的文件被改过（外部编辑器或另一个窗口）。这次没有写入——重新载入看一遍，再把改动合并过去。',
         problems: '这一篇现在没法注册',
-        notRegistered: '未注册',
-        takenByOther: '这个 id 被别的所有者占用了',
-        takenByGhost: '本插件旧实例的残留注册（热重载留下），刷新清不掉——重启 DSH 即清除',
-        notRegisteredRetry: '没注册上，点「刷新」重试',
+        /*
+         * One line per registration state (`registrationState`). Each says only
+         * what was actually observed — none of them claim the persona cannot
+         * run, because the panel has no evidence for that either way.
+         */
+        stateGhost: '检测到旧实例残留：完全重启 DSH 即可清除',
+        stateForeign: 'ID 占用冲突：检测到其他声明者持有此 ID，当前无法确认其对应的文件',
+        stateStaleHost: '宿主还是升级前的版本，判不出这个 id 由谁持有——完全退出 DSH 再启动，这里才会给出准确结论',
+        stateUnknown: '注册状态待确认，点「刷新」重新扫描',
         activationFailed: '激活失败',
         loading: '读取中…',
         empty: '这个目录里还没有人设。',
@@ -222,6 +227,21 @@ window.__ModuleLoader__.load({
         hiddenRowValue: '点开看，逐条取消隐藏',
         paging: '分页',
         pagingHint: '人设多了再打开；关闭时一次列全部。',
+        /*
+         * The capability choice. `modeChat` / `modeTools` are the two tab
+         * labels, so they are short nouns rather than sentences.
+         */
+        modeTitle: '模式',
+        modeHint: '聊天只留人设和上下文，工作给完整工具集；团队始终按聊天跑。',
+        modeChat: '聊天',
+        modeTools: '工作',
+        /*
+         * Shown where the switch would be when the Host does not report `mode`
+         * at all. Not a state the user chose — a Host still running the build
+         * it booted with, which cannot be fixed from inside the panel.
+         */
+        modeStale: '宿主还是升级前的版本，读不到这个设置：完全退出 DSH 再启动就有了。',
+        modeChanged: '已切换到「{mode}」。新开的人设会话按新的能力注册；已经开着的会话保持创建时的工具集。',
         perPage: '每页',
         versionTitle: '插件版本',
         defaultTitle: '新会话默认用谁',
@@ -306,7 +326,16 @@ window.__ModuleLoader__.load({
         teamBackgroundHint: '每次讨论都带着。写她们彼此的关系、已知的事、不能越过的设定——成员看不到主对话，只信这一栏。',
         teamSelection: '成员',
         teamSelectionHint: '人设和组都行。组是每次运行时重新解析的，谁在组里就是谁。',
-        teamNoSelection: '一个人都没加，这样的队等于空队。',
+        /*
+         * A team is a discussion, and one person cannot discuss. The old
+         * wording ("an empty team") only covered zero picks and let a
+         * one-person team save, which then ran as a monologue.
+         */
+        teamTooFewHint: '团队至少要两个人；组按当前成员展开来算。',
+        teamTooFewTitle: '团队至少要两个人',
+        teamTooFewBody: '现在只解析到 {count} 个人。团队模式是一场讨论，一个人讨论不起来——再勾一个，或者改用单人会话。',
+        teamTooFewOk: '知道了',
+        teamChatOnly: '团队始终按聊天跑，不受「设置 → 模式」影响：讨论里每个成员只回答一次，工具用不上。',
         teamAddPersona: '加人设',
         teamAddGroup: '加组',
         /* `teamThinking*` used to name the stage/narrated switch. The control is
@@ -465,10 +494,10 @@ window.__ModuleLoader__.load({
         reload: 'Load again',
         conflict: 'The file changed on disk (an outside editor or another window). This save did NOT happen — load it again and merge.',
         problems: 'She cannot be registered right now',
-        notRegistered: 'not registered',
-        takenByOther: 'another owner holds this id',
-        takenByGhost: "a leftover registration from this plugin's previous instance (hot reload) — refresh cannot clear it; restart DSH",
-        notRegisteredRetry: 'registration did not land — press Refresh',
+        stateGhost: 'a leftover registration from a previous instance — a full restart of DSH clears it',
+        stateForeign: 'id conflict: another declaration holds this id, and which file backs it cannot be determined here',
+        stateStaleHost: 'the Host is still the build from before this fix, so who holds this id cannot be judged — quit DSH fully and start it again',
+        stateUnknown: 'registration unconfirmed — press Refresh to scan again',
         activationFailed: 'activation failed',
         loading: 'Loading…',
         empty: 'No wife in this directory yet.',
@@ -485,6 +514,12 @@ window.__ModuleLoader__.load({
         hiddenRowValue: 'open to bring one back',
         paging: 'Paging',
         pagingHint: 'Turn it on once the roster grows; off lists everything at once.',
+        modeTitle: 'Mode',
+        modeHint: 'Chat keeps the persona and context only; Work gives the full toolset. Teams always run as chat.',
+        modeChat: 'Chat',
+        modeTools: 'Work',
+        modeStale: 'the Host is still the build from before the upgrade, so this setting does not exist yet — quit DSH fully and start it again.',
+        modeChanged: 'Switched to "{mode}". New persona sessions register with the new capability list; sessions already open keep the tools they were created with.',
         perPage: 'Per page',
         versionTitle: 'Plugin version',
         defaultTitle: 'Default for new sessions',
@@ -566,7 +601,11 @@ window.__ModuleLoader__.load({
         teamBackgroundHint: 'Carried into every discussion. Their relation to each other, what is already known, what must not be broken — members never see the main conversation, so this is the only thing they trust.',
         teamSelection: 'members',
         teamSelectionHint: 'personas or groups. A group re-resolves on every run — whoever carries the tag, that is who runs.',
-        teamNoSelection: 'not one member added; a team like this resolves to nothing.',
+        teamTooFewHint: 'a team needs at least two people; a group counts as its current members.',
+        teamTooFewTitle: 'a team needs at least two people',
+        teamTooFewBody: 'Only {count} resolved. Team mode is a discussion, and one person cannot discuss — tick one more, or use a solo session.',
+        teamTooFewOk: 'got it',
+        teamChatOnly: 'teams always run as chat and ignore Settings → Mode: every member answers once, so tools have nothing to do.',
         teamAddPersona: 'add persona',
         teamAddGroup: 'add group',
         teamUnitPerson: 'members',
@@ -716,6 +755,13 @@ window.__ModuleLoader__.load({
       hint: { fontSize: '12px', color: 'var(--dsw-alias-label-secondary)' },
       error: { fontSize: '12px', color: 'var(--dsw-alias-state-error-primary)' },
       ok: { fontSize: '12px', color: 'var(--dsw-alias-state-success-primary)' },
+      /*
+       * Attention without alarm: a row whose id is held by something that is not
+       * this file — the id still resolves, so this is not an error. The theme's
+       * state tokens are error / success / business, and business is the neutral
+       * "notice" one (it is what drop targets use); there is no warning token.
+       */
+      warn: { fontSize: '12px', color: 'var(--dsw-alias-state-business-primary)' },
       grow: { flex: 1, minWidth: 0 },
       field: { display: 'flex', alignItems: 'center', gap: '8px' },
       label: { fontSize: '12px', color: 'var(--dsw-alias-label-secondary)', minWidth: '52px' },
@@ -1257,18 +1303,36 @@ window.__ModuleLoader__.load({
       );
     }
 
-    function Segmented({ value, options, onChange }) {
+    /**
+     * A small choice between peers.
+     *
+     * `variant: 'tabs'` borrows the pill bar at the top of the panel (same
+     * styles, same weight) so a two-way setting reads as the same kind of
+     * control as the 人设 / 团队 switch above it. The compact default stays for
+     * rows that sit inline with other controls.
+     */
+    function Segmented({ value, options, onChange, variant, disabled }) {
+      const asTabs = variant === 'tabs';
       return h(
         'span',
-        { style: L.seg },
+        { style: asTabs === true ? L.tabs : L.seg, ...(asTabs === true ? { role: 'tablist' } : null) },
         options.map((option) =>
           h(
             'button',
             {
               key: option.value,
               type: 'button',
-              style: { ...L.segItem, ...(option.value === value ? L.segActive : null) },
-              onClick: () => onChange(option.value),
+              role: 'tab',
+              'aria-selected': option.value === value,
+              disabled: disabled === true,
+              style: {
+                ...(asTabs === true ? L.tabBtn : L.segItem),
+                ...(option.value === value ? (asTabs === true ? L.tabActive : L.segActive) : null),
+                ...(disabled === true ? { opacity: 0.5, cursor: 'default' } : null),
+              },
+              onClick: () => {
+                if (disabled !== true) onChange(option.value);
+              },
             },
             option.label,
           ),
@@ -1382,6 +1446,44 @@ window.__ModuleLoader__.load({
             h(Btn, { variant: 'outline', onClick: onCancel }, cancelLabel),
             h(Btn, { variant: 'primary', disabled: busyLocal, onClick: run }, confirmLabel),
           ),
+        ),
+      );
+    }
+
+    /**
+     * A one-button notice.
+     *
+     * `Confirm` is a gate (it wants an acknowledgement tick before the primary
+     * button arms), which is the wrong shape for "this did not happen, here is
+     * why": there is nothing to risk and nothing to confirm. Reusing it would
+     * make the user tick a box to dismiss a sentence.
+     */
+    function Alert({ open, title, description, okLabel, onClose }) {
+      if (open !== true) return null;
+      const footer = h(
+        'div',
+        { style: L.bar },
+        h(Btn, { variant: 'primary', onClick: onClose }, okLabel),
+      );
+      if (primitives !== null && typeof primitives.Modal === 'function') {
+        return h(primitives.Modal, {
+          open: true,
+          onClose,
+          title,
+          closeLabel: okLabel,
+          description,
+          footer,
+        });
+      }
+      return h(
+        'div',
+        { style: L.overlay },
+        h(
+          'div',
+          { style: L.dialog },
+          h('span', { style: L.rowTitle }, title),
+          h('span', { style: L.hint }, description),
+          footer,
         ),
       );
     }
@@ -1896,6 +1998,46 @@ window.__ModuleLoader__.load({
       onDragEnd,
     }) {
       const problems = item.problems ?? [];
+      /*
+       * Who holds this id, in one word — resolved by the Host (`registrationState`)
+       * so the panel, the Host and the tests read the same truth table. The local
+       * fallback keeps an older Host working (it ships the flags, not the word),
+       * and is ordered exactly like the Host's.
+       */
+      const state =
+        item.state ?? (item.owned === true ? 'ours' : item.ghost === true ? 'ghost' : item.foreign === true ? 'foreign' : 'unknown');
+      /*
+       * A Host that sends `foreign`/`ghost` but NOT `state` is the build from
+       * before `ownGhostNote` was fixed: it read `readDocument()`'s wrapper as a
+       * string, so the fingerprint never matched and `ghost` was unreachable.
+       * On that Host every leftover — including this plugin's own — necessarily
+       * arrives as `foreign`, which makes 「占用冲突」 a verdict it cannot
+       * actually reach. The panel therefore says the one true thing instead:
+       * not judgeable until DSH restarts. `ours` still shows nothing: that flag
+       * is bookkeeping, not a fingerprint, and it was correct before the fix.
+       */
+      const staleHost = item.state === undefined;
+      /*
+       * Weight per answer. Only `ghost` is red: it is proven, it is ours, and it
+       * has a remedy. `foreign` means ONE thing and no more — a declaration this
+       * plugin cannot claim currently holds the id. The roster behind that
+       * verdict carries `id/name/description/order/broken` and nothing about
+       * who declared it, so the sentence must not name a file, a plugin, or the
+       * content behind the id; it says the id is taken and that the holder is
+       * unidentifiable HERE. `unknown` is the absence of proof in either
+       * direction. Both used to be drawn in the same red as 「未注册」, which is
+       * the claim this table exists to stop making.
+       */
+      const stateLook =
+        state === 'ours'
+          ? null
+          : staleHost
+            ? [L.error, 'stateStaleHost']
+            : {
+                ghost: [L.error, 'stateGhost'],
+                foreign: [L.warn, 'stateForeign'],
+                unknown: [L.hint, 'stateUnknown'],
+              }[state] ?? null;
       // Sorting mode owns the whole row: a caret click or a default switch while a
       // drag is being set up is how a reorder turns into an accidental edit, which
       // is exactly the surprise the off-by-default switch exists to prevent.
@@ -1964,19 +2106,13 @@ window.__ModuleLoader__.load({
            */
           problems.length > 0 ? h('span', { style: L.error }, t('problems')) : null,
           /*
-           * Two sentences, because there are two facts here and only one of them
-           * is knowable from the panel. `foreign` means the last scan actually
-           * saw another owner holding this id; without it the honest statement is
-           * 「没注册上」. The single line this replaces blamed another owner for
-           * what was usually this plugin's own re-registration still in flight —
-           * a false accusation drawn on a row that was working fine.
+           * ONE sentence, chosen by state — see `stateLook` above. The badge no
+           * longer starts with 「未注册」: that word asserted a failure, while all
+           * three states it covered were different facts (a ghost, an occupier
+           * that is not us, or no evidence at all).
            */
-          problems.length === 0 && item.owned !== true && (broken === null || broken === undefined)
-            ? h(
-                'span',
-                { style: L.error },
-                `${t('notRegistered')} · ${item.ghost === true ? t('takenByGhost') : item.foreign === true ? t('takenByOther') : t('notRegisteredRetry')}`,
-              )
+          problems.length === 0 && stateLook !== null && (broken === null || broken === undefined)
+            ? h('span', { style: stateLook[0] }, t(stateLook[1]))
             : null,
           broken !== null && broken !== undefined ? h('span', { style: L.error }, `${t('activationFailed')}: ${broken}`) : null,
           h('span', { style: L.push }),
@@ -2301,8 +2437,8 @@ window.__ModuleLoader__.load({
             h('span', { style: L.meta }, `${picked.size} ${t('teamUnitPerson')}`),
             h('span', { style: L.hint }, t('teamSelectionHint')),
           ),
-          draft.selection.length === 0
-            ? h('span', { style: problem === 'selection' ? L.error : L.hint }, t('teamNoSelection'))
+          picked.size < 2
+            ? h('span', { style: problem === 'selection' ? L.error : L.hint }, t('teamTooFewHint'))
             : null,
         ),
         block(
@@ -2506,7 +2642,7 @@ window.__ModuleLoader__.load({
      * what happens past the cap — are drawn as ordinary `SettingRow`s, and the
      * directory itself sits between them as content.
      */
-    function TeamTab({ team, t, busy, draft, onOpen, onPatch, onSaveDraft, onCancelDraft, onRemove, onReload, onBatch, onClearMemory, onDefault, defaultId, fieldProblem }) {
+    function TeamTab({ team, t, busy, draft, onOpen, onPatch, onSaveDraft, onCancelDraft, onRemove, onReload, onBatch, onClearMemory, onDefault, defaultId, fieldProblem, mode }) {
       const [batch, setBatch] = React.useState(null);
       const loaded = team !== null && team.ok === true;
       const cap = batch === null ? String((loaded ? team.batch.maxTeamSize : null) ?? '') : batch.cap;
@@ -2570,6 +2706,12 @@ window.__ModuleLoader__.load({
           h(Btn, { variant: 'toolbar', disabled: busy, onClick: onClearMemory }, t('teamMemoryClearBtn')),
         ),
         h('span', { style: L.hint }, t('teamPresetNote')),
+        /*
+         * Only worth a line while the global mode says 工作: otherwise the two
+         * agree and the sentence answers a question nobody has. When they
+         * disagree, this is the reason.
+         */
+        mode === 'tools' ? h('span', { style: L.hint }, t('teamChatOnly')) : null,
       );
     }
 
@@ -2644,6 +2786,10 @@ window.__ModuleLoader__.load({
       onPatchSkeleton,
       onSaveSkeleton,
       onOpenSkeleton,
+      /* `'chat'` or `'tools'`; absent on an older Host, which renders the row
+         as "utility tools" without a switch it cannot honour. */
+      mode,
+      onMode,
     }) {
       const configurable = data?.configurable === true;
       const running = update?.installed ?? update?.running ?? '—';
@@ -2671,6 +2817,39 @@ window.__ModuleLoader__.load({
       return h(
         'div',
         { style: L.list },
+        /*
+         * The capability choice comes first because it changes what every
+         * persona below it can do.
+         */
+        h(
+          SettingRow,
+          { title: t('modeTitle'), hint: t('modeHint') },
+          /*
+           * Two tabs, not a switch. A switch can only say on/off, and the two
+           * states here are peers: 聊天 and 工作 are both first-class ways to run
+           * a persona, so the control reads as a choice between them rather
+           * than as one of them being "disabled".
+           *
+           * Absent `mode` does NOT mean 工作; it means the answer came from a
+           * Host that predates the setting. That happens for real after an
+           * upgrade: the panel's own code is read off disk every time it opens,
+           * while the Host module stays whatever was loaded at boot. Saying so
+           * is the only honest rendering — printing 工作 would read as a tab
+           * deliberately chosen with no way to choose another.
+           */
+          typeof mode === 'string'
+            ? h(Segmented, {
+                variant: 'tabs',
+                value: mode,
+                disabled: busy,
+                options: [
+                  { value: 'chat', label: t('modeChat') },
+                  { value: 'tools', label: t('modeTools') },
+                ],
+                onChange: (next) => onMode(next),
+              })
+            : h('span', { style: L.error }, t('modeStale')),
+        ),
         h(
           SettingRow,
           { title: t('dirLabel'), hint: configurable === true ? t('dirHint') : t('dirLocked') },
@@ -3328,6 +3507,43 @@ window.__ModuleLoader__.load({
       );
 
       /**
+       * Flip the capability switch.
+       *
+       * The Host rescans and re-registers every persona, so the reply already
+       * carries the fresh status — `setData` is what keeps the roster (and the
+       * switch itself) from showing the old mode while the registry holds the
+       * new one. `loadRoster` runs as well because `status` does not carry the
+       * default-resolution flags the persona rows read.
+       */
+      const switchMode = React.useCallback(
+        async (next) => {
+          const mode = next === 'chat' ? 'chat' : 'tools';
+          if (data?.mode === mode) return;
+          setBusy(true);
+          try {
+            const payload = await post({ op: 'setMode', mode });
+            if (payload.state !== undefined) setData(payload.state);
+            void loadRoster();
+            setNote({
+              kind: 'ok',
+              text: t('modeChanged').replace('{mode}', mode === 'chat' ? t('modeChat') : t('modeTools')),
+            });
+          } catch (failure) {
+            setNote({ kind: 'error', text: String(failure?.message ?? failure) });
+            /*
+             * A refused write can still have moved `mode.json` (the Host
+             * reports "written, rescan failed" as `ok: false`), so the panel
+             * re-reads instead of assuming nothing changed.
+             */
+            void load();
+          } finally {
+            setBusy(false);
+          }
+        },
+        [data, load, loadRoster, setNote, t],
+      );
+
+      /**
        * Open the team editor.
        *
        * `null` means **new**, not **close**. Closing is `onCancelTeam`, and one
@@ -3394,9 +3610,27 @@ window.__ModuleLoader__.load({
           setNote({ kind: 'error', text: t('teamNameRequired') });
           return;
         }
-        if (draft.selection.length === 0) {
+        /*
+         * Count PEOPLE, not selection entries: one group can hold five wives
+         * and one group can hold none. The same expansion the Host runs is
+         * repeated here so the refusal lands next to the picker instead of
+         * arriving as a toast after a round trip — and so a one-person team
+         * never gets written to disk to be "fixed" by the runtime's old
+         * single-mode fallback.
+         */
+        const picked = new Set();
+        for (const one of draft.selection) {
+          if (one.kind === 'group') {
+            for (const row of team?.rows ?? []) {
+              if (one.ref !== '' && groupOf(row) === one.ref) picked.add(row.id);
+            }
+          } else if ((team?.rows ?? []).some((row) => row.id === one.ref)) {
+            picked.add(one.ref);
+          }
+        }
+        if (picked.size < 2) {
           setTeamProblem('selection');
-          setNote({ kind: 'error', text: t('teamNoSelection') });
+          setDialog({ kind: 'teamTooFew', count: picked.size });
           return;
         }
         setTeamProblem(null);
@@ -3416,7 +3650,7 @@ window.__ModuleLoader__.load({
           },
         });
         if (ok) setTeamDraft(null);
-      }, [teamDraft, mutateTeam, setNote, t]);
+      }, [teamDraft, team, mutateTeam, setNote, t]);
 
       const removeTeam = React.useCallback(
         async (name) => {
@@ -4545,6 +4779,10 @@ window.__ModuleLoader__.load({
         onPatchSkeleton: patchSkeletonDraft,
         onSaveSkeleton: saveSkeleton,
         onOpenSkeleton: openSkeleton,
+        /* The capability choice. `undefined` on an older Host — the row then
+           says the setting is unreadable instead of drawing a dead control. */
+        mode: data?.mode,
+        onMode: switchMode,
       };
 
       /*
@@ -4584,6 +4822,7 @@ window.__ModuleLoader__.load({
          * persona default off — one field, two tabs.
          */
         onDefault: setTeamDefault,
+        mode: data?.mode,
         defaultId:
           team !== null && team.ok === true && typeof team.defaultId === 'string'
             ? team.defaultId
@@ -4822,6 +5061,18 @@ window.__ModuleLoader__.load({
             if (typeof name === 'string' && name !== '') await removeTeam(name);
           },
         }),
+        /*
+         * The "at least two people" notice. A toast alone was not enough: the
+         * form still looked complete, so the refusal read as a broken button.
+         * This lands as a window, and the field itself is marked red behind it.
+         */
+        h(Alert, {
+          open: dialog !== null && dialog.kind === 'teamTooFew',
+          title: t('teamTooFewTitle'),
+          description: t('teamTooFewBody').replace('{count}', String(dialog?.count ?? 0)),
+          okLabel: t('teamTooFewOk'),
+          onClose: () => setDialog(null),
+        }),
         h(Confirm, {
           // Only while nothing has started. The moment the install begins, the
           // window below replaces this one IN PLACE — and it stays there.
@@ -4940,9 +5191,9 @@ window.__ModuleLoader__.load({
     /**
      * Keep our nav row's glyph in step with the panel's persona icon.
      *
-     * The row only exists while the settings modal is open, so the work is a
-     * debounced sweep over a MutationObserver rather than a timer: the modal is
-     * portalled into `document.body` and re-renders whenever the nav rows do.
+     * The row only exists while the settings modal is open, so the work hangs
+     * off a MutationObserver rather than a timer: the modal is portalled into
+     * `document.body` and re-renders whenever the nav rows do.
      *
      * @param label - the row's label text.
      * @returns a disposer.
@@ -4966,21 +5217,45 @@ window.__ModuleLoader__.load({
         `  mask: ${mask} center / 16px 16px no-repeat;`,
         `}`,
       ].join('\n');
-      let timer = 0;
+      /**
+       * Is the row already wearing our attribute?
+       *
+       * Only the marked rows are read, so the hot path costs a query over at
+       * most one node no matter how much the panel mutates.
+       */
+      const marked = () => {
+        for (const button of document.querySelectorAll(`button[${NAV_ATTR}]`)) {
+          if ((button.textContent ?? '').trim() === label) return true;
+        }
+        return false;
+      };
       const sweep = () => {
         try {
+          /*
+           * A reload takes the stylesheet with the instance that added it, while
+           * the attribute stays on the row React never rebuilt. Left alone, the
+           * row would hide its own gear and draw nothing — so the sheet is
+           * re-attached here rather than assumed to still be there.
+           */
+          if (!document.head.contains(style)) document.head.appendChild(style);
+          if (marked()) return;
           markNavRow(label);
         } catch (error) {
           /* nav chrome only: a miss leaves the gear in place */
         }
       };
-      const observer = new MutationObserver(() => {
-        if (timer !== 0) return;
-        timer = setTimeout(() => {
-          timer = 0;
-          sweep();
-        }, 200);
-      });
+      /*
+       * Swept in the observer's own tick, never on a timer.
+       *
+       * The 200 ms debounce that used to sit here is exactly what produced the
+       * flash people saw when opening settings: the modal mounts its nav rows,
+       * the shell's gear paints, and only a fifth of a second later does the row
+       * gain its attribute and swap to the persona glyph — read as "the icon
+       * changed by itself". Observer callbacks run after the mutation but before
+       * the browser paints, so marking there means the very first frame already
+       * carries the glyph.
+       */
+      const observer = new MutationObserver(sweep);
       try {
         observer.observe(document.body, { childList: true, subtree: true });
         document.head.appendChild(style);
@@ -4990,7 +5265,6 @@ window.__ModuleLoader__.load({
       }
       return () => {
         observer.disconnect();
-        if (timer !== 0) clearTimeout(timer);
         try {
           style.remove();
         } catch (error) {

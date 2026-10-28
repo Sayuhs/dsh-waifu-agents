@@ -29,6 +29,7 @@
  *   exportArchive  pack the chosen files (default: all) into one base64 `.zip`
  *   refresh     rescan the directory and adopt newly added files
  *   setDir      write `config.dir` back through the configEditor service
+ *   setMode     switch personas between pure chat and the full utility toolset
  *   updateCheck which version runs, which one is installed, which one the registry has
  *   updateApply install the newest published version through the pluginManager service
  *
@@ -100,6 +101,7 @@ import {
   NAME_LIMIT,
   CAP_POLICIES,
   adoptTeam,
+  expandSelection,
   saveTarget,
   storeProblem,
   defaultRenameFollow,
@@ -338,6 +340,15 @@ const OVERRIDE_FILE = "dsh-waifu-agents.overrides.json";
 const LEGACY_OVERRIDE_FILE = "persona-waifu.overrides.json";
 const OVERRIDE_FILE_IN_DIR = "overrides.json";
 
+/**
+ * Where the plugin remembers which capability shape personas run with.
+ *
+ * Beside `teams.json` on purpose: the persona directory (or its read-only
+ * fallback) is the one place this plugin owns, so "what is this install's
+ * state" stays one directory rather than a second hidden location.
+ */
+const MODE_FILE = "mode.json";
+
 /** Bounded so a long-lived install cannot accumulate dead session ids forever. */
 const OVERRIDE_LIMIT = 500;
 
@@ -394,6 +405,87 @@ export const TEAM_PRESET_PREFIX = "团队-";
  * refusing a leading `-` keeps an id from ever looking like an option.
  */
 export const ID_OK = /^[\p{L}\p{N}][\p{L}\p{N}-]*$/u;
+
+/*
+ * Registration bookkeeping shared by EVERY live `apply()` of this plugin in the
+ * same runtime process.
+ *
+ * Why this exists: the host re-runs `apply()` on reload paths (a forced entry
+ * update re-applies the plugin on its fiber), and each invocation used to mint
+ * a FRESH `owned` map inside its own closure. Two applies then raced through
+ * their two `void scan()`s — each saw the other's registrations as an unknown
+ * occupier, tried to register the same ids, and the loser reported 「存在同名
+ * Id」 on a fresh first install, fixed only by a restart (which applies once).
+ * Keying the state on the global registry makes even two module evaluations of
+ * this file cooperate: whoever registered an id first is visible to every
+ * later scan as `owned`, and the scan mutex below removes the read/register
+ * interleaving window entirely.
+ *
+ * The `dispose` closures stored here may belong to another (alive or dying)
+ * instance's fiber — calling them is still correct: the registry's unregister
+ * is context-independent, and a double call is guarded idempotent on the
+ * registry side.
+ */
+const REG_STATE_KEY = Symbol.for("dsh-waifu-agents/registration-state");
+const REG_STATE = (globalThis[REG_STATE_KEY] ??= {
+  /** preset id -> { dispose, rev }: who registered it, and as what text. */
+  owned: new Map(),
+  /** id -> hold count: registrations currently mid-flight, ours by definition. */
+  registering: new Map(),
+  /** Serialization chain: scans run one at a time, across every instance. */
+  scans: Promise.resolve(),
+  /**
+   * Team preset id -> { dispose, name, description, applied }: same job as
+   * `owned`, for the half of this plugin's presets that is not a persona file.
+   *
+   * `applied` is the token of the apply() that wrote the row. It is the only
+   * way to tell 「this registration is MINE」 from 「a twin instance registered
+   * it」 once the bookkeeping is shared — `dispose` cannot do it, because the
+   * caller holding the map is not necessarily the caller that registered.
+   */
+  teamOwned: new Map(),
+  /**
+   * Team preset id -> team name. The registry's team half: a running session's
+   * own preset id is the only thing `anchorOf` can read, so without this map
+   * there is no way to know a session was born on a team.
+   *
+   * The value is a plain string, so sharing it across instances is safe — it
+   * carries no handle and no lifetime.
+   */
+  teamPresets: new Map(),
+  /** Serialization chain for team syncs, across every instance. */
+  teamSyncs: Promise.resolve(),
+  /**
+   * Apply counter: which instance was born when, in THIS process.
+   *
+   * Incremented once per `apply()`, never per scan — a scan is a repeat of the
+   * same owner asking again, and letting it bump the counter would make the
+   * quietest instance look newest. Its only job is the takeover rule in
+   * `scanOnce`: a row written by a later instance is never touched by an
+   * earlier one, which is what stops two live instances from trading an id
+   * back and forth on every refresh.
+   */
+  epoch: 0,
+});
+
+/*
+ * A REG_STATE from an older build is already on `globalThis` when the plugin is
+ * replaced in-process (the host re-applies without a restart). That object has
+ * no team half, and `??=` at the literal above cannot fill it in — it only
+ * fires when the KEY is missing. Without these three lines the first team
+ * sync after an in-place upgrade would write to `undefined`.
+ */
+REG_STATE.teamOwned ??= new Map();
+REG_STATE.teamPresets ??= new Map();
+REG_STATE.teamSyncs ??= Promise.resolve();
+/*
+ * Instance ordering, same object-literal caveat: a build from before this field
+ * left a REG_STATE without `epoch`, and the literal's default is not written to
+ * an object that already exists. Starting it at 0 means the next `apply()` is
+ * instance 1 — an upgraded build is always NEWER than the code that wrote the
+ * rows already on the book, which is exactly the direction a takeover needs.
+ */
+REG_STATE.epoch ??= 0;
 
 /**
  * `SKIP` is a list of file names, and Windows compares file names
@@ -674,13 +766,74 @@ function skeletonFor(meta, skeleton) {
 }
 
 /**
+ * The two capability shapes a preset can be registered in.
+ *
+ * `chat` is a conversation and nothing else; `tools` is the full list from
+ * `template.json`. Team mode is always `chat`, whatever the row says — see
+ * `templateRowsFor`.
+ */
+export const MODES = ["chat", "tools"];
+
+/**
+ * Coerce a stored or requested mode.
+ *
+ * Anything unrecognised falls back to `tools`, which is what every install has
+ * been running until this switch existed: adding the switch must not silently
+ * strip tools from someone who never touched it. A missing `mode.json` is
+ * therefore `tools` as well.
+ * @param {unknown} value
+ * @returns {"chat" | "tools"}
+ */
+export function normalizeMode(value) {
+  return value === "chat" ? "chat" : "tools";
+}
+
+/**
+ * The capability rows a pure-chat preset may mount.
+ *
+ * A whitelist, not a blacklist: `template.json` gains a row every time the
+ * host ships a new tool, and a blacklist would quietly hand each new tool to a
+ * persona that was switched to pure chat. What survives is the minimum a
+ * conversation needs — the persona itself, the clock, and compaction once the
+ * history gets long. No filesystem, shell, web, subagent, plan, or todo rows.
+ *
+ * The group rows are kept whole (`compaction` is a `cordis:group`): splicing
+ * its children would produce a shape the host never validated.
+ */
+const CHAT_CAPABILITY_IDS = new Set(["persona", "time-context", "compaction"]);
+
+/**
+ * Filter a capability list down to the pure-chat set.
+ * @param {unknown} rows `template.json`-shaped capability rows
+ * @returns {unknown[]}
+ */
+export function chatRows(rows) {
+  return (Array.isArray(rows) ? rows : []).filter(
+    (row) =>
+      row !== null &&
+      typeof row === "object" &&
+      CHAT_CAPABILITY_IDS.has(row.id),
+  );
+}
+
+/**
  * What one registration actually mounted, so a later scan can tell "already
  * registered" apart from "registered, but her text has changed since".
+ *
+ * The mode is part of the fingerprint: flipping the chat switch changes the
+ * mounted capability list without touching a single file, and a rev that
+ * ignored the mode would make `scan()` skip every persona and leave the old
+ * tool set in place until a restart.
+ * @param {{ text: string } | null} skeleton
+ * @param {unknown} body
+ * @param {unknown} [mode]
  */
-export function registrationRev(skeleton, body) {
+export function registrationRev(skeleton, body, mode = "tools") {
   const frame =
     skeleton === null || skeleton === undefined ? "" : skeleton.text;
-  return revision(`${frame}\u0000${String(body ?? "")}`);
+  return revision(
+    `${normalizeMode(mode)}\u0000${frame}\u0000${String(body ?? "")}`,
+  );
 }
 
 /**
@@ -789,6 +942,79 @@ export function personaExpected({ overrideId, mountedId, hasRow } = {}) {
 }
 
 /**
+ * Who holds this id, as far as the last scan could prove — one word, one truth
+ * table, shared by the Host, the panel and the tests.
+ *
+ * The four answers exist because three of them were previously collapsed into a
+ * single alarming sentence:
+ *
+ *  - `ours`    this instance registered it (or is between the two halves of a
+ *              re-registration — `registering` counts as ours, which is what
+ *              stops our own churn from looking like a conflict);
+ *  - `ghost`   occupied, and the composition fingerprint says the occupier is a
+ *              previous instance of THIS plugin. Actionable: restart DSH;
+ *  - `foreign` occupied by something we cannot claim. That is a statement about
+ *              **ownership**, not about whether the persona works: the id
+ *              resolves, so a session can start; what is unproven is that the
+ *              text behind it is this file's;
+ *  - `unknown` the scan ran and none of the above is true — no registration
+ *              landed and no occupier was seen. The old code drew this as
+ *              「未注册」 in the same red as a hard failure, which claimed more
+ *              than the evidence supported.
+ *
+ * Precedence is deliberate: ours wins over everything (a row cannot be both
+ * ours and occupied by someone else), a proven ghost outranks an unproven
+ * occupier because it comes with a remedy, and "nothing seen" is the fallback.
+ * Pure and exported so the panel's wording and the tests read the same table
+ * instead of re-deriving it from flags.
+ *
+ * @param {object} [flags]
+ * @param {boolean} [flags.owned] registered by this plugin (incl. mid-swap)
+ * @param {boolean} [flags.ghost] occupier fingerprinted as a previous instance
+ * @param {boolean} [flags.foreign] an occupier was seen that is not ours
+ * @returns {"ours" | "ghost" | "foreign" | "unknown"}
+ */
+export function registrationState({ owned, foreign, ghost } = {}) {
+  if (owned === true) return "ours";
+  if (ghost === true) return "ghost";
+  if (foreign === true) return "foreign";
+  return "unknown";
+}
+
+/**
+ * The composition text behind `readDocument()`, whatever shape the Host hands
+ * back.
+ *
+ * The service resolves with a WRAPPER — `{ agentPreset, content, name?,
+ * description? }` (see `readDocument` in `dsh-agent-preset-registry`, whose
+ * `content` is the `dump()` of the declared plugin list). The first version of
+ * the ghost check assumed a raw string, so `String(object)` collapsed to
+ * `"[object Object]"`: the fingerprint could never match, `ghost` was
+ * unreachable, and every identified leftover fell through to a warning that
+ * blamed an unrelated declaration.
+ *
+ * A `content` that is already a structure is serialised rather than
+ * string-coerced — the check is a substring search, so keys and values have to
+ * survive. Any OTHER shape yields "" on purpose: an unreadable document must
+ * fail the check, never pass it.
+ *
+ * @param {unknown} doc whatever `readDocument()` resolved with
+ * @returns {string} the composition text, or "" when the shape is not readable
+ */
+export function documentText(doc) {
+  if (typeof doc === "string") return doc;
+  if (doc === null || typeof doc !== "object") return "";
+  const content = doc.content;
+  if (typeof content === "string") return content;
+  if (content === null || typeof content !== "object") return "";
+  try {
+    return JSON.stringify(content);
+  } catch {
+    return "";
+  }
+}
+
+/**
  * Move one id directly in front of another.
  *
  * @param {string[]} ids the current sequence
@@ -894,8 +1120,56 @@ export function apply(ctx, config = {}) {
     "include:persona-waifu",
   ];
 
-  /** preset id -> { dispose, rev }: the disposer, plus what was registered. */
-  const owned = new Map();
+  /**
+   * preset id -> { dispose, rev, applied, epoch }: the disposer, what was
+   * registered, and who registered it.
+   *
+   * SHARED across every live apply() of this plugin (`REG_STATE` at the top of
+   * the module) — a per-invocation map is how two applies of the same plugin
+   * ended up racing each other on a fresh install, each reading the other's
+   * registrations as an unknown occupier. Sharing one map means the rows are
+   * visible to every instance, so a scan never reads a twin's work as a
+   * stranger's.
+   *
+   * Visible is not the same as transferable: a later apply does NOT adopt an
+   * earlier one's row, it TAKES IT OVER — dispose the old registration, install
+   * its own (`scanOnce`, ordered by `instEpoch`). Adoption was the R5 bug: the
+   * adopting instance held a row whose disposer closed over the OTHER
+   * instance's fiber, so when that fiber died the registrations went with it
+   * and the survivor cheerfully skipped the ids it no longer owned.
+   */
+  const owned = REG_STATE.owned;
+
+  /**
+   * Which apply() wrote a ledger row, and when it was born.
+   *
+   * The row says 「this id is registered and here is how to take it down」. It
+   * does NOT say 「that disposer will still be callable later」: the function
+   * closes over the registering instance's fiber, and the fiber dies with it.
+   * When two applies share the book, the later one used to adopt the earlier
+   * one's rows as its own — same id, same text — and then inherit a disposer
+   * that dies first.
+   *
+   *   `instToken` answers 「did *I* write this row」.
+   *   `instEpoch` answers 「was the writer born before or after me」.
+   *
+   * Both are needed. Identity alone is not a takeover rule: two instances that
+   * are BOTH alive would each see a foreign token and each take the row, every
+   * scan, forever — a ping-pong in which the disposer changes hands on every
+   * refresh. Ordering alone is not a rule either: without the token, an
+   * instance cannot tell its own stale row (text changed → rebuild) from a
+   * newer instance's row (leave it alone). Together they give one direction of
+   * travel: only rows from an EARLIER instance may be taken, so the instance
+   * that applied last owns the id and, since it also outlives the others in
+   * the ordinary reload shape, owns the disposer too.
+   *
+   * Allocated HERE, once per `apply()` — never in `scanOnce`. A scan is the
+   * same instance asking again; if it advanced the counter, two live instances
+   * alternating refreshes would take turns looking newest and the ping-pong
+   * would come back through the front door.
+   */
+  const instToken = {};
+  const instEpoch = (REG_STATE.epoch = (REG_STATE.epoch ?? 0) + 1);
 
   /**
    * Ids that are OURS but momentarily unregistered.
@@ -910,9 +1184,11 @@ export function apply(ctx, config = {}) {
    * reload asks for the roster.
    *
    * Counted rather than a Set: `update` and `scan` can overlap on one id, and the
-   * first to finish must not release the other one's hold.
+   * first to finish must not release the other one's hold. Shared via
+   * `REG_STATE` like `owned`, for the same reason: a twin apply mid-swap must
+   * be visible here, or the other instance's scan reads the gap as a conflict.
    */
-  const registering = new Map();
+  const registering = REG_STATE.registering;
 
   /**
    * Ids another owner really holds, as of the last scan.
@@ -1063,6 +1339,51 @@ export function apply(ctx, config = {}) {
     homeFromEnv(process.env).home,
     LEGACY_OVERRIDE_FILE,
   );
+
+  /* ------------------------------------------------------------ chat / tools */
+
+  /** `mode.json` beside the override store — see `MODE_FILE`. */
+  const modeFile = path.join(path.dirname(overrideFile), MODE_FILE);
+
+  /**
+   * The mode this process runs in.
+   *
+   * Read once at apply and written only by `setMode`, which also re-registers
+   * every persona: the capability list is baked into a registration, so a
+   * switch that only changed this variable would look applied in the panel and
+   * change nothing in the model until the next restart.
+   */
+  let currentMode = readStoredMode();
+
+  function readStoredMode() {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(modeFile, "utf8"));
+      return normalizeMode(parsed?.mode);
+    } catch {
+      // No file, or one a half-finished write left unreadable: the pre-switch
+      // behaviour (full tools) is the only safe reading.
+      return "tools";
+    }
+  }
+
+  function writeStoredMode(mode) {
+    fs.mkdirSync(path.dirname(modeFile), { recursive: true });
+    writeAtomic(modeFile, `${JSON.stringify({ mode }, null, 2)}\n`);
+  }
+
+  /**
+   * The capability rows one preset gets.
+   *
+   * A team is chat by definition, not by setting: every member answers in one
+   * pass inside a request the runtime builds itself, so handing them a shell
+   * or a filesystem would describe a capability the discussion cannot use.
+   * That is also why the global switch never reaches team presets.
+   * @param {"persona" | "team"} kind
+   */
+  function templateRowsFor(kind) {
+    const rows = readTemplate();
+    return kind === "team" || currentMode === "chat" ? chatRows(rows) : rows;
+  }
 
   /** session id -> { personaId, at }; loaded once, rewritten atomically. */
   let overrides = null;
@@ -2182,6 +2503,18 @@ export function apply(ctx, config = {}) {
         parsed.body,
         skeletonFor(parsed.meta, skeleton) === null ? null : skeleton.text,
       );
+      /*
+       * `registering` counts as owned: the preset is still this plugin's, it is
+       * merely between two halves of a re-registration (see the declaration).
+       * Reporting it as unowned turns our own churn into a conflict warning.
+       * Before the first scan settles there is no verdict at all, so the answer
+       * is "yes, ours" rather than "no" — see `scannedOnce`.
+       */
+      const mine = scannedOnce !== true || owned.has(id) || registering.has(id);
+      /* Whether a REAL conflict was observed: only `scan` can know that. */
+      const isForeign = foreign.has(id);
+      /* Whether the occupier is provably a previous instance of this plugin. */
+      const isGhost = ghosts.has(id);
       out.push({
         id,
         idOk: ID_OK.test(id),
@@ -2193,18 +2526,16 @@ export function apply(ctx, config = {}) {
         chars: parsed.chars,
         charsFull: poured.text.length,
         problems: poured.problems,
+        owned: mine,
+        foreign: isForeign,
+        ghost: isGhost,
         /*
-         * `registering` counts as owned: the preset is still this plugin's, it is
-         * merely between two halves of a re-registration (see the declaration).
-         * Reporting it as unowned turns our own churn into a conflict warning.
-         * Before the first scan settles there is no verdict at all, so the answer
-         * is "yes, ours" rather than "no" — see `scannedOnce`.
+         * The same three flags, resolved to one word by the shared truth table.
+         * Shipped alongside them rather than instead of them: the panel words
+         * its badge from `state`, while `foreign`/`ghost` stay readable for
+         * anything that wants the raw evidence (and for older panels).
          */
-        owned: scannedOnce !== true || owned.has(id) || registering.has(id),
-        /* Whether a REAL conflict was observed: only `scan` can know that. */
-        foreign: foreign.has(id),
-        /* Whether the occupier is provably a previous instance of this plugin. */
-        ghost: ghosts.has(id),
+        state: registrationState({ owned: mine, foreign: isForeign, ghost: isGhost }),
         mtimeMs: parsed.mtimeMs,
         size: parsed.size,
       });
@@ -2292,9 +2623,27 @@ export function apply(ctx, config = {}) {
    * is recognised), `teamOwned` is id -> what was registered (how it is taken
    * back). A session's own preset id is the only thing `anchorOf` can read, so
    * without the first map there is no way to know a session was born on a team.
+   *
+   * Both live in `REG_STATE`, shared across every live apply() of this plugin,
+   * for the same reason `owned` does: a twin instance that cannot see the other
+   * one's registrations either re-registers them (the registry refuses the
+   * duplicate and the team silently ends up with no preset at all) or — worse —
+   * treats them as unknown and tears them down. The host re-applies this plugin
+   * during install and reload, so the window is real.
    */
-  const teamPresets = new Map();
-  const teamOwned = new Map();
+  const teamPresets = REG_STATE.teamPresets;
+  const teamOwned = REG_STATE.teamOwned;
+
+  /**
+   * Identity of THIS apply(), stamped onto every team row it writes.
+   *
+   * Sharing the map removes the blindness but not the ownership question: with
+   * one map there are two instances' rows in it, and 「delete the row for this
+   * id」 stops being a safe operation unless the row is provably mine. A fresh
+   * object per apply() is enough — reference equality against `entry.applied`
+   * answers 「did I write this row?」, and nothing else needs to be stored.
+   */
+  const teamToken = {};
 
   /** The team a session was born on, or `null`. */
   function teamNameForPreset(presetId) {
@@ -2375,6 +2724,68 @@ export function apply(ctx, config = {}) {
    * reach with `/waifu-team`, and failing the write that created it would be a
    * worse answer than warning.
    */
+  /**
+   * Take one team row down: bookkeeping first, then the registration.
+   *
+   * Both halves move together on purpose. The id -> name mapping is what
+   * `/waifu-team` and the default-preset row read, so a mapping that outlives
+   * its registration sends them to a preset the registry no longer has — the
+   * failure looks like 「那个团队不存在了」 on a team the user can see in the
+   * list. The mapping is only dropped when it still describes THIS row
+   * (`=== entry.name`): a twin may have replaced both halves already, and
+   * erasing its mapping would be the same mistake in the other direction.
+   *
+   * A failed disposal puts the row back. The registration is still alive on the
+   * platform side when `dispose` throws, and a row nobody can see is a row no
+   * later pass can retry: the next attempt would register over it, hit
+   * `Duplicate agent preset`, and warn forever without ever recovering.
+   *
+   * @param {string} id
+   * @param {{ dispose: () => Promise<unknown>, name: string }} entry
+   * @returns {Promise<boolean>} whether the registration is gone
+   */
+  async function detachTeamRow(id, entry) {
+    /*
+     * Delete only if the ledger still holds EXACTLY this row.
+     *
+     * Today every pass runs through the shared `teamSyncs` chain, so no other
+     * pass can write between the caller's read and this delete — the condition
+     * is unreachable, and that is precisely why it is written down: the
+     * unconditional delete was safe only because of a guarantee made forty
+     * lines away. A future caller that reaches `runTeamPresetSync` off the
+     * chain, or a dispose hook that lands here, would otherwise delete a
+     * twin's row and take its name mapping with it — one instance erasing the
+     * live registration of another.
+     */
+    if (teamOwned.get(id) === entry) teamOwned.delete(id);
+    try {
+      await entry.dispose();
+    } catch (error) {
+      // Put the row back and leave the name mapping untouched: a disposal that
+      // failed leaves the registration alive on the platform side, so the
+      // mapping is still the truth. A row nobody can see is a row no later pass
+      // can retry — the next attempt would register over it, hit
+      // `Duplicate agent preset`, and warn forever without ever recovering.
+      //
+      // Only restore if no other instance claimed the id while we were
+      // disposing; writing over a live twin's row would hide it from the
+      // instance that can actually use it.
+      if (!teamOwned.has(id)) teamOwned.set(id, entry);
+      ctx.logger?.warn?.(
+        `dsh-waifu-agents: 卸下团队预设「${entry.name}」失败：${error?.message ?? error}`,
+      );
+      return false;
+    }
+    /*
+     * The registration is gone, so the mapping has to go with it — but only if
+     * nobody replaced the row in the meantime. A twin registering the same
+     * team writes the same name, so the name is not enough to tell whose
+     * mapping this is; the empty ledger is.
+     */
+    if (!teamOwned.has(id) && teamPresets.get(id) === entry.name) teamPresets.delete(id);
+    return true;
+  }
+
   async function runTeamPresetSync() {
     if (teamRuntime === null) return;
     const store = teamRuntime.store();
@@ -2392,21 +2803,45 @@ export function apply(ctx, config = {}) {
           : `团队模式 · ${members.length} 人：${members.join("、")}`;
       wanted.set(id, { name: team.name, description });
     }
+    /*
+     * Retire the rows this apply() wrote and no longer wants.
+     *
+     * `entry.applied !== teamToken` is the whole point of the shared map: a row
+     * belonging to a twin instance must NOT be torn down here. That instance is
+     * still running and still considers the preset live; deleting its row drops
+     * its name mapping too, and its own sync would then re-register onto an id
+     * it had already given up. Only the instance that wrote a row may retire
+     * it — and if it dies without doing so, its dispose hook retires it then.
+     */
     for (const [id, entry] of [...teamOwned]) {
+      if (entry.applied !== teamToken) continue;
       const want = wanted.get(id);
       if (want !== undefined && want.name === entry.name && want.description === entry.description) continue;
-      teamOwned.delete(id);
-      teamPresets.delete(id);
-      try {
-        await entry.dispose();
-      } catch (error) {
-        ctx.logger?.warn?.(`dsh-waifu-agents: 卸下团队预设「${entry.name}」失败：${error?.message ?? error}`);
-      }
+      await detachTeamRow(id, entry);
     }
     let at = 0;
     for (const [id, want] of wanted) {
       at += 1;
-      if (teamOwned.has(id)) continue;
+      const held = teamOwned.get(id);
+      if (
+        held !== undefined &&
+        held.applied === teamToken &&
+        held.name === want.name &&
+        held.description === want.description
+      )
+        continue;
+      /*
+       * A row written by another instance — or a stale row of our own, or a row
+       * whose text changed — cannot be adopted. Its disposer belongs to a
+       * registration that dies with the fiber that made it, so reusing it would
+       * leave this instance holding a corpse and the team unpickable until the
+       * next restart. Take it down and register afresh, exactly as the persona
+       * half does in `scanOnce`.
+       *
+       * Sharing the ledger is how this instance KNOWS there is a row. It is not
+       * permission to skip the registration.
+       */
+      if (held !== undefined && !(await detachTeamRow(id, held))) continue;
       try {
         // The body is only validated, never served: the preset row is a
         // placeholder and `resolvePersonaText` returns `""` for a team preset
@@ -2416,13 +2851,27 @@ export function apply(ctx, config = {}) {
           id,
           { name: want.name, description: want.description, order: at },
           `你与「${want.name}」这一队一起工作。`,
-          readTemplate(),
+          // Chat rows, always: team mode is chat mode regardless of the switch.
+          templateRowsFor("team"),
           null,
           TEAM_ORDER_BASE,
         );
         const dispose = await ctx.agentPresets.register(definition);
-        ctx.on("dispose", dispose);
-        teamOwned.set(id, { dispose, ...want });
+        /*
+         * Two jobs, same shape as the persona half. Retire the row when this
+         * fiber dies, and only when the ledger still holds THIS registration:
+         * a twin may have replaced it since, and this instance dying must not
+         * erase the replacement's record or its name mapping.
+         */
+        ctx.on("dispose", () => {
+          const current = teamOwned.get(id);
+          if (current !== undefined && current.dispose === dispose) {
+            teamOwned.delete(id);
+            if (teamPresets.get(id) === want.name) teamPresets.delete(id);
+          }
+          return dispose();
+        });
+        teamOwned.set(id, { dispose, applied: teamToken, ...want });
         teamPresets.set(id, want.name);
       } catch (error) {
         ctx.logger?.warn?.(
@@ -2439,16 +2888,21 @@ export function apply(ctx, config = {}) {
    * as "register an id the other one is registering", the registry refuses the
    * duplicate, and the team silently ends up with no preset at all.
    *
+   * The chain lives in `REG_STATE` for the same reason the books do: a reload
+   * leaves the previous instance's `void syncTeamPresets()` in flight, and an
+   * instance-local chain would let the new instance run its pass alongside it.
+   * Sharing the map without sharing the chain would be worse than neither —
+   * two passes reading one ledger, both deciding the other's rows are stale.
+   *
    * Chained rather than dropped: a pass skipped because one is in flight would
    * miss the team the caller just wrote.
    */
-  let teamSyncChain = Promise.resolve();
   function syncTeamPresets() {
-    teamSyncChain = teamSyncChain.then(
+    REG_STATE.teamSyncs = REG_STATE.teamSyncs.then(
       () => runTeamPresetSync(),
       () => runTeamPresetSync(),
     );
-    return teamSyncChain;
+    return REG_STATE.teamSyncs;
   }
 
   /*
@@ -2527,15 +2981,78 @@ export function apply(ctx, config = {}) {
       skeleton === null ? null : skeleton.text,
     );
     if (!poured.ok) throw new Error(poured.problems.join("；"));
-    const dispose = await ctx.agentPresets.register(
-      buildDefinition(id, meta, body, readTemplate(), skeleton),
+    const platformDispose = await ctx.agentPresets.register(
+      buildDefinition(id, meta, body, templateRowsFor("persona"), skeleton),
     );
-    ctx.on("dispose", dispose);
-    owned.set(id, { dispose, rev: registrationRev(skeleton, body) });
+    /*
+     * At most ONE call ever reaches `platformDispose`.
+     *
+     * Two callers can want this registration gone: this instance's fiber dying,
+     * and `unregister` while a newer instance takes the row over. The
+     * platform's disposer removes the preset BY ID and has no idea which
+     * registration it is removing, so a second call landing after the taker's
+     * `register` would delete the TAKER's preset — the exact way a dead
+     * instance could reach across and empty a live one.
+     *
+     * Single-flight covers the timing hole identity checking cannot: between
+     * `unregister` deleting the row and `registerOne` writing the replacement,
+     * the ledger is empty, so a hook firing in that window sees no owner to
+     * compare against and would otherwise dispose blind.
+     *
+     * Retryable by design: a throw clears the slot so the next attempt can try
+     * again, which is what keeps a temporarily failing disposal from silently
+     * orphaning a registration.
+     */
+    let retirement = null;
+    const retire = () => {
+      if (retirement === null) {
+        retirement = (async () => platformDispose())();
+        retirement.catch(() => {
+          retirement = null;
+        });
+      }
+      return retirement;
+    };
+    /*
+     * Two jobs in one hook. The obvious one unregisters the preset when THIS
+     * instance's fiber dies. The shared-bookkeeping one removes OUR entry from
+     * `REG_STATE.owned` — and only ours: a twin instance may have replaced the
+     * row since (its disposer sits in the map instead), and this instance
+     * dying must not erase the replacement's record. Without this cleanup the
+     * surviving twin would keep skipping an id whose registration just
+     * vanished with the dead fiber, and every session would answer with the
+     * platform fallback until a manual refresh.
+     *
+     * The replacement case must not dispose AT ALL. Taking the row over runs
+     * this instance's disposer on the way (see `unregister`), so a second call
+     * here is not a harmless repeat — it is a delete against whatever now holds
+     * the id. Identity is the whole guard; `retire` is the backstop for the
+     * window where the row is momentarily gone.
+     *
+     * ORDER IS THE CONTRACT with `unregister`: it deletes the row FIRST, then
+     * awaits the disposer, so an explicit teardown always arrives here with
+     * `current === undefined` and still disposes. Move that `delete` after an
+     * await and this hook starts seeing its own row, taking the
+     * `current.dispose === retire` branch — still correct. Move it after the
+     * AWAIT ITSELF and a rename/update would leave the registration alive with
+     * nothing on the book.
+     */
+    ctx.on("dispose", () => {
+      const current = owned.get(id);
+      if (current !== undefined && current.dispose !== retire) return undefined;
+      if (current !== undefined) owned.delete(id);
+      return retire();
+    });
+    owned.set(id, {
+      dispose: retire,
+      rev: registrationRev(skeleton, body, currentMode),
+      applied: instToken,
+      epoch: instEpoch,
+    });
   }
 
   /**
-   * Is the occupier of this id a previous instance of this plugin?
+   * Is the occupier of this id provably this plugin?
    *
    * Written after reading the platform source (`dsh-agent-preset-registry`),
    * which killed the previous reclaim design twice over:
@@ -2554,17 +3071,30 @@ export function apply(ctx, config = {}) {
    * prefix — a combination nothing else registers. Feature-detected: the
    * service surface is not contractually promised to expose it.
    *
+   * The text comes from `documentText()`, which accepts both the wrapper object
+   * the service actually resolves with and a plain string. Reading only the
+   * string shape is what made this check dead code for a whole release: the
+   * fingerprint never matched, so `ghost` was unreachable and every leftover
+   * was reported as an unknown occupier.
+   *
+   * The occupier this identifies can be a DEAD instance (hot-reload ghost) or
+   * a LIVE twin (the host re-applies the plugin during install/reload, and
+   * both instances exist for a while). The shared `REG_STATE.owned` normally
+   * lets twins cooperate before any accusation, so reaching this check means
+   * the occupier predates the shared bookkeeping either way — the remedy is
+   * the same: a restart leaves exactly one instance holding the id.
+   *
    * @param {string} id
    * @returns {Promise<string | null>} the panel note when provably ours, else null
    */
   async function ownGhostNote(id) {
     try {
       if (typeof ctx.agentPresets?.readDocument !== "function") return null;
-      const doc = await ctx.agentPresets.readDocument(id);
-      const text = typeof doc === "string" ? doc : String(doc ?? "");
+      const text = documentText(await ctx.agentPresets.readDocument(id));
+      if (text === "") return null;
       if (!text.includes("@deepseek-ai/dsh-persona")) return null;
       if (!text.includes(PERSONA_PLACEHOLDER)) return null;
-      return "本插件旧实例的残留注册（插件文件在运行中被替换后热重载留下），刷新清不掉——重启 DSH 即清除";
+      return "本插件另一个实例仍持有这个 id（热重载或升级期间新旧实例并存），当前实例接不过来；重启 DSH 后只保留一个实例，即可恢复";
     } catch {
       return null;
     }
@@ -2579,7 +3109,7 @@ export function apply(ctx, config = {}) {
    * until the next restart, which is exactly the surprise the panel gets blamed
    * for.
    */
-  async function scan() {
+  async function scanOnce() {
     /*
      * Recomputed, never accumulated: a conflict that was resolved by renaming
      * the file has to stop being reported. `foreign` is the evidence the panel
@@ -2623,10 +3153,51 @@ export function apply(ctx, config = {}) {
       const rev = registrationRev(
         skeletonFor(parsed.meta, readSkeleton()),
         parsed.body,
+        currentMode,
       );
+      /*
+       * One guard for every branch below: an id mid-registration (by this scan
+       * earlier in the loop, by a concurrent op, or by a twin instance's scan —
+       * the holds live in the shared `registering` map) is ours by
+       * definition. Reading the gap as a conflict is how the panel ended up
+       * accusing a wife of stealing her own id.
+       */
+      if (registering.has(item.id)) continue;
       const owner = owned.get(item.id);
       if (owner !== undefined) {
-        if (owner.rev === rev) continue;
+        const mine = owner.applied === instToken;
+        /*
+         * Three questions, three answers:
+         *
+         *  - mine, same text, roster agrees → nothing to do.
+         *  - someone NEWER wrote it → do not touch it. Taking the row here is
+         *    the ping-pong: two live instances each refresh, each sees a
+         *    foreign token, each re-registers, and the disposer changes hands
+         *    forever.
+         *  - mine and stale, or an OLDER instance's → rebuild. Rebuilding is
+         *    how a newer instance becomes the owner while the older one is
+         *    still alive, so that the older one's fiber dying later takes
+         *    nothing down with it.
+         *
+         * A row with no numeric `epoch` predates the ordering (an in-place
+         * upgrade kept the shared object). It is treated as older — the code
+         * that wrote it runs inside an instance that applied before us — and
+         * the takeover itself is still safe: `unregister` deletes only THIS id
+         * from the book, disposes only this id's registration, and leaves every
+         * other row alone.
+         */
+        if (mine && owner.rev === rev && roster.has(item.id)) continue;
+        if (!mine && typeof owner.epoch === "number" && owner.epoch >= instEpoch)
+          continue;
+        /*
+         * The rev check needs the roster's agreement. After a twin instance
+         * died, its per-id dispose hook deletes the shared record — but if a
+         * scan slipped between the registry row vanishing and that cleanup
+         * (or the dying fiber's disposal is still in flight), `owned` holds a
+         * row the registry no longer does. Skipping on rev alone would then
+         * leave the wife unregistered until a manual refresh; requiring the
+         * roster row turns that gap into an ordinary reload.
+         */
         holdRegistration(item.id);
         try {
           await unregister(item.id);
@@ -2640,13 +3211,6 @@ export function apply(ctx, config = {}) {
         continue;
       }
       if (roster.has(item.id)) {
-        /*
-         * `roster` counts OUR rows too, and an id that is mid-registration is
-         * still ours. Calling that a foreign conflict is how the panel ended up
-         * accusing a wife of stealing her own id; a read that lands here simply
-         * has nothing to do.
-         */
-        if (registering.has(item.id)) continue;
         /*
          * Occupied, and not by anything we registered in THIS instance. The
          * platform refuses duplicate registration (never upserts) and offers
@@ -2670,7 +3234,22 @@ export function apply(ctx, config = {}) {
         await registerOne(item.id, parsed.meta, parsed.body);
         added.push(item.id);
       } catch (error) {
-        problems.push(`${item.id}: ${error.message ?? error}`);
+        /*
+         * A duplicate here means an occupier appeared between the roster read
+         * and this register — the twin/ghost shapes the shared state and the
+         * scan mutex are supposed to prevent, caught at their last chance.
+         * If the composition fingerprint says the occupier is provably this
+         * plugin, report it as the identified ghost it is instead of a raw
+         * 「Duplicate agent preset」 the user could do nothing with.
+         */
+        const ghostNote = await ownGhostNote(item.id);
+        if (ghostNote !== null) {
+          ghosts.add(item.id);
+          foreign.add(item.id);
+          skipped.push({ id: item.id, reason: ghostNote });
+        } else {
+          problems.push(`${item.id}: ${error.message ?? error}`);
+        }
       } finally {
         releaseRegistration(item.id);
       }
@@ -2679,6 +3258,35 @@ export function apply(ctx, config = {}) {
     // rather than "not yet", which is what lets the panel draw 「未注册」 at all.
     scannedOnce = true;
     return { added, reloaded, skipped, problems };
+  }
+
+  /**
+   * The only way anyone runs a scan: queued behind every other scan, across
+   * every live apply() of this plugin (the chain lives in `REG_STATE`).
+   *
+   * A scan's decisions span awaits — the roster read, each registration — so
+   * two overlapping scans interleave their read/register windows even though
+   * each one is internally consistent. On a fresh install the boot scan and a
+   * reload-triggered re-apply's scan could both see an empty roster for the
+   * same id and both attempt the register; the loser's 「Duplicate agent
+   * preset」 was the 同名 Id failure the panel showed. Serializing makes the
+   * second scan a no-op instead of a competitor: by its turn the roster
+   * already carries the first scan's rows, and `owned` (shared) names their
+   * owner.
+   *
+   * A failed scan must not poison the chain, so the chain stores a settled
+   * swallow while the caller still receives the real outcome.
+   */
+  function scan() {
+    const run = REG_STATE.scans.then(
+      () => scanOnce(),
+      () => scanOnce(),
+    );
+    REG_STATE.scans = run.then(
+      () => {},
+      () => {},
+    );
+    return run;
   }
 
   /**
@@ -2796,6 +3404,12 @@ export function apply(ctx, config = {}) {
       dirExists: fs.existsSync(dir),
       template: templatePath,
       configurable: Boolean(ctx.get("configEditor")),
+      /*
+       * Chat or utility tools. The panel draws one switch from this, and a
+       * team preset ignores it by construction (`templateRowsFor("team")`).
+       */
+      mode: currentMode,
+      modes: MODES,
       defaultId: cachedDefault.id,
       defaultSource: cachedDefault.source,
       defaultError: cachedDefault.error,
@@ -3821,6 +4435,61 @@ export function apply(ctx, config = {}) {
       ok: true,
       dir: next || null,
       note: "配置已写入；插件会重启并重新扫描目录。",
+    };
+  }
+
+  /**
+   * Flip between pure chat and the full utility toolset.
+   *
+   * The write order matters. `mode.json` goes down FIRST, then `scan()`: a
+   * crash between the two leaves the file saying `chat` while the registry
+   * still holds the old rows, and the next boot reads the file and fixes the
+   * registry. The other order would leave a process believing something the
+   * file contradicts.
+   *
+   * Every persona is re-registered because `registrationRev` includes the
+   * mode; a scan with an unchanged rev is a no-op by design. Team presets are
+   * skipped on purpose — `templateRowsFor("team")` ignores the switch, so
+   * their capability list did not change.
+   */
+  async function setMode(request) {
+    const requested = String(request?.mode ?? "").trim();
+    if (!MODES.includes(requested)) {
+      return { ok: false, error: `mode 只能是 ${MODES.join(" / ")}。` };
+    }
+    const mode = normalizeMode(requested);
+    const previous = currentMode;
+    if (mode !== previous) {
+      currentMode = mode;
+      try {
+        writeStoredMode(mode);
+      } catch (error) {
+        currentMode = previous;
+        return {
+          ok: false,
+          error: `写 ${MODE_FILE} 失败，模式没有改：${error?.message ?? error}`,
+        };
+      }
+      try {
+        await scan();
+      } catch (error) {
+        /*
+         * The file is already the truth, so reporting a failed switch would be
+         * a lie — but so would staying quiet: the model keeps the old tool set
+         * until the scan succeeds. Say which half landed.
+         */
+        return {
+          ok: false,
+          mode,
+          error: `已写入 ${MODE_FILE}（下次启动生效），但这次重新注册失败：${error?.message ?? error}`,
+        };
+      }
+    }
+    return {
+      ok: true,
+      mode,
+      changed: mode !== previous,
+      state: await status(),
     };
   }
 
@@ -4955,8 +5624,35 @@ export function apply(ctx, config = {}) {
        * not cost the team its role sentences.
        */
       const entry = adoptTeam(name, before === null ? (request.team ?? {}) : { ...before, ...(request.team ?? {}) });
-      if (entry.selection.length === 0) {
-        return { ok: false, error: "这个团队一条选择都没有，等于空队。至少要加一个人设或一个组。" };
+      /*
+       * A team is two voices or it is not a team.
+       *
+       * This used to accept one entry and let the runtime fall back to single
+       * mode, which read as "the team is running" while one persona answered
+       * alone. The rule is now enforced where the user can still fix it: the
+       * selection is expanded against the LIVE directory, so a group that
+       * happens to hold one member is caught here too, not just an obviously
+       * short list.
+       */
+      const expanded = expandSelection({
+        selection: entry.selection,
+        roster: listFiles(),
+        strict: false,
+      });
+      if (expanded.unknownGroups.length > 0) {
+        return {
+          ok: false,
+          error: `组「${expanded.unknownGroups.join("、")}」找不到任何成员，检查一下名字或先给成员打上这个组标签。`,
+        };
+      }
+      if (expanded.members.length < 2) {
+        const dropped = expanded.removed.map((row) => row.name).join("、");
+        return {
+          ok: false,
+          error:
+            `团队至少要两个人，现在只解析到 ${expanded.members.length} 个。` +
+            (dropped === "" ? "" : `（${dropped} 选不进来：不在目录里或组装不出来。）`),
+        };
       }
       if (at < 0) store.teams.push(entry);
       else store.teams[at] = entry;
@@ -5554,6 +6250,7 @@ export function apply(ctx, config = {}) {
     if (op === "exportArchive") return exportArchive(request);
     if (op === "template") return exportTemplate();
     if (op === "setDir") return setDir(request);
+    if (op === "setMode") return setMode(request);
     if (op === "setDefault") return setDefault(request);
     if (op === "roster") return roster();
     if (op === "waifuState") return waifuState(request);
@@ -5570,7 +6267,7 @@ export function apply(ctx, config = {}) {
     if (op === "purge") return purge(request);
     return {
       ok: false,
-      error: `未知的 op：${op}（可用：list / get / refresh / create / update / rename / remove / hidden / restore / batch / search / skeleton / setSkeleton / import / export / exportAll / template / setDir / setDefault / roster / waifuState / waifuApply / waifuClear / waifuOrder / teamState / teamSet / teamPick / teamMemoryClear / updateCheck / updateApply / updateProgress / purge）`,
+      error: `未知的 op：${op}（可用：list / get / refresh / create / update / rename / remove / hidden / restore / batch / search / skeleton / setSkeleton / import / export / exportAll / template / setDir / setMode / setDefault / roster / waifuState / waifuApply / waifuClear / waifuOrder / teamState / teamSet / teamPick / teamMemoryClear / updateCheck / updateApply / updateProgress / purge）`,
     };
   }
 
@@ -5579,7 +6276,7 @@ export function apply(ctx, config = {}) {
   ctx.commands.register({
     name: "persona",
     description:
-      "dsh-waifu-agents：list / get / refresh / create / update / rename / remove / hidden / restore / batch / search / skeleton / setSkeleton / import / export / exportAll / template / setDir / setDefault / roster / updateCheck / updateApply / updateProgress。",
+      "dsh-waifu-agents：list / get / refresh / create / update / rename / remove / hidden / restore / batch / search / skeleton / setSkeleton / import / export / exportAll / template / setDir / setMode / setDefault / roster / updateCheck / updateApply / updateProgress。",
     input: { hint: '{"op":"list"}' },
     handler: async ({ rawInput }) => {
       let request;
