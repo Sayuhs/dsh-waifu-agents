@@ -92,6 +92,7 @@ window.__ModuleLoader__.load({
         tabWives: '人设',
         tabTeam: '团队',
         tabSettings: '设置',
+        tabMemory: '记忆',
         search: '搜索名字、简述或正文…',
         add: '新增',
         import: '导入 md',
@@ -207,7 +208,6 @@ window.__ModuleLoader__.load({
          * what was actually observed — none of them claim the persona cannot
          * run, because the panel has no evidence for that either way.
          */
-        stateGhost: '检测到旧实例残留：完全重启 DSH 即可清除',
         stateForeign: 'ID 占用冲突：检测到其他声明者持有此 ID，当前无法确认其对应的文件',
         stateStaleHost: '宿主还是升级前的版本，判不出这个 id 由谁持有——完全退出 DSH 再启动，这里才会给出准确结论',
         stateUnknown: '注册状态待确认，点「刷新」重新扫描',
@@ -232,7 +232,7 @@ window.__ModuleLoader__.load({
          * labels, so they are short nouns rather than sentences.
          */
         modeTitle: '模式',
-        modeHint: '聊天只留人设和上下文，工作给完整工具集；团队始终按聊天跑。',
+        modeHint: '聊天只留人设和上下文，工作给完整工具集；团队始终按聊天跑。单个会话还能用 /waifu-mode here 单独设，那种只改一场的选择不会显示在这里。',
         modeChat: '聊天',
         modeTools: '工作',
         /*
@@ -366,8 +366,8 @@ window.__ModuleLoader__.load({
         teamListTitle: '已存的团队',
         teamPickHint: '点一下勾选，再点一下取消。存的是人设 id，改名也不断。',
         teamPickEmpty: '这个目录里还没有能加的人设。',
-        teamStale: '不在目录里了',
-        teamStaleHint: '这些已经选不上，但还占着队伍名额。删掉或者改回目录里有的名字。',
+        teamStale: '这些现在用不上',
+        teamStaleHint: '这些这一轮不会算上她们，也不计入上面的人数：目录里没有这个名字，或者她的人设组装不出来（模板读不到、文件名里有特殊字符）。删掉，或者先把人设修好。',
         teamUnitGone: '已失效',
         teamCapPolicyHint: '上限 3 却点到 5 个人时：「超出就不跑」= 这一轮整队不跑；「超出取前几个」= 只留名单里靠前的 3 个，其余跳过并点名。',
         teamMemory: '剧情记忆',
@@ -377,6 +377,46 @@ window.__ModuleLoader__.load({
         teamMemoryHint: '这一轮记得之前几轮：最近的场次逐字带、更早的压成梗概。记忆按「会话 × 队伍」存：只在这一场里积累，新会话从零开始，中途换队也不串剧情。保留多久在下面那行自己填（填 0 = 永久保留）。关掉则回到每轮无记忆、成本恒定的旧形态。',
         teamMemoryKeep: '记忆保留（天）',
         teamMemoryKeepHint: '超过这么多天没续上的记忆，下次读到时自动清除、当新会话处理。填 0 = 永久保留，直到用下面的「强制清空」手动删。默认 7。',
+        memoryTitle: '长期记忆',
+        memoryHint: '跟着角色走，和本局剧情分开。默认「情节」，只在本队生效；标「稳定」才跨队。每轮最多 3 条、只取相关的，人设永远优先。',
+        memoryGlobal: '总开关',
+        memoryGlobalHint: '关掉后所有角色都不读、不写、不注入。已存的记忆不会被删除，重新打开继续用；每个角色自己的开关保持不变。',
+        memoryCapture: '工作模式也记',
+        memoryCaptureHint: '关着时只有聊天模式的回合写长期记忆；打开后，带工具干活（工作模式）的回合也记一条。默认关：干活时被选中的「最长的一句」往往是一段代码或一条命令，不是她说过的话。',
+        memoryReload: '重新读取',
+        memoryReloaded: '已重新读取 · 共 {n} 条记忆。',
+        memoryUnreadable: '读不到记忆目录，这一页暂时是空的。',
+        memoryCount: '{n} 条',
+        memoryDepth: '最多保存',
+        memoryDepthSave: '保存',
+        memoryDepthHint: '只影响本地存多少条，不影响每轮注入几条（固定最多 3 条）。改小会立刻整理一次：先删最旧的，手动标为稳定的留到最后。',
+        memoryDepthRange: '可填 {min}–{max}',
+        memoryView: '查看',
+        memoryHide: '收起',
+        memoryClear: '清空',
+        memoryClearTitle: '清空长期记忆',
+        memoryClearAsk: '把「{name}」记得的事全部删掉？开关和保存上限会保留，但记忆内容找不回来。',
+        memoryCleared: '已清空「{name}」的记忆。',
+        memorySaved: '已保存。',
+        memoryTrimmed: '已保存，并按新上限删掉了 {n} 条。',
+        memoryBroken: '这个角色的记忆文件读不出来（内容损坏）。清空一次就能恢复成空文件。',
+        memoryNone: '这个角色还没有记忆。',
+        memoryKindEpisode: '情节',
+        memoryKindStable: '稳定',
+        memoryKindEpisodeTitle: '情节记忆：只在产生它的那支队伍里可用',
+        memoryKindStableTitle: '稳定记忆：跨会话、跨队伍都可用',
+        memoryMakeStable: '标为稳定',
+        memoryMakeEpisode: '改回情节',
+        memoryDelete: '删除',
+        memoryEdit: '编辑',
+        memorySave: '保存',
+        memoryCancel: '取消',
+        memoryDeleted: '已删除这一条。',
+        memorySourceTeam: '来自团队「{team}」',
+        memorySourceSolo: '来自单人对话',
+        memoryEmptyText: '内容不能为空。',
+        memoryOffHint: '这个角色已关闭：不读也不写记忆。',
+        memoryGlobalOff: '总开关关着：这个角色现在不读也不写。',
         teamMemoryClear: '强制清空记忆',
         teamMemoryClearHint: '不分保留期、立刻删掉所有会话的剧情记忆文件（梗概+场次），删了找不回来。人设、团队配置、账本不受影响。',
         teamMemoryClearBtn: '清空',
@@ -390,6 +430,7 @@ window.__ModuleLoader__.load({
         tabWives: 'Wives',
         tabTeam: 'Teams',
         tabSettings: 'Settings',
+        tabMemory: 'Memory',
         search: 'Search name, summary or body…',
         add: 'New',
         import: 'Import md',
@@ -494,7 +535,6 @@ window.__ModuleLoader__.load({
         reload: 'Load again',
         conflict: 'The file changed on disk (an outside editor or another window). This save did NOT happen — load it again and merge.',
         problems: 'She cannot be registered right now',
-        stateGhost: 'a leftover registration from a previous instance — a full restart of DSH clears it',
         stateForeign: 'id conflict: another declaration holds this id, and which file backs it cannot be determined here',
         stateStaleHost: 'the Host is still the build from before this fix, so who holds this id cannot be judged — quit DSH fully and start it again',
         stateUnknown: 'registration unconfirmed — press Refresh to scan again',
@@ -515,7 +555,7 @@ window.__ModuleLoader__.load({
         paging: 'Paging',
         pagingHint: 'Turn it on once the roster grows; off lists everything at once.',
         modeTitle: 'Mode',
-        modeHint: 'Chat keeps the persona and context only; Work gives the full toolset. Teams always run as chat.',
+        modeHint: 'Chat keeps the persona and context only; Work gives the full toolset. Teams always run as chat. A single session can still be pinned with /waifu-mode here — that choice does not show up here.',
         modeChat: 'Chat',
         modeTools: 'Work',
         modeStale: 'the Host is still the build from before the upgrade, so this setting does not exist yet — quit DSH fully and start it again.',
@@ -630,8 +670,8 @@ window.__ModuleLoader__.load({
         teamListTitle: 'saved teams',
         teamPickHint: 'click to tick, click again to clear. The id is stored, so a rename does not break it.',
         teamPickEmpty: 'this directory has no persona to add yet.',
-        teamStale: 'gone from the directory',
-        teamStaleHint: 'these can no longer be picked but still hold a slot. Drop them, or rename them back to something the directory has.',
+        teamStale: 'these cannot be used right now',
+        teamStaleHint: 'They are left out of this run and out of the headcount above: either the directory has no such name, or the persona fails to assemble (template missing, characters a filename cannot hold). Remove them, or fix the persona first.',
         teamUnitGone: 'unresolvable',
         teamCapPolicyHint: 'cap 3 but 5 were named: "skip the run" drops the whole team this turn; "keep the first few" takes the first 3 in listed order, skips the rest and names them.',
         teamMemory: 'plot memory',
@@ -641,6 +681,46 @@ window.__ModuleLoader__.load({
         teamMemoryHint: 'this round remembers the previous ones: recent rounds verbatim, older ones folded into a summary. Memory is keyed to a session AND a team: it builds up within one session, a new session starts blank, and switching teams mid-session never bleeds plot across. Set how long it is kept in the row below (0 = keep forever). Off returns to the old stateless-per-round mode at constant cost.',
         teamMemoryKeep: 'memory retention (days)',
         teamMemoryKeepHint: 'memory idle for more than this many days is cleared on sight and the session starts fresh. 0 = keep forever, until the force-clear below removes it by hand. Default 7.',
+        memoryTitle: 'Long-term memory',
+        memoryHint: 'The character\'s own memory, separate from this story\'s plot. "Episode" counts only inside its own team; mark one "stable" to count elsewhere. At most 3 per turn, only the relevant ones, and the static persona always outranks memory.',
+        memoryGlobal: 'Master switch',
+        memoryGlobalHint: 'Off means nobody reads, writes or injects anything. Stored memories are kept, and each character\'s own switch is left exactly as it was.',
+        memoryCapture: 'Also record in work mode',
+        memoryCaptureHint: 'Off means only chat-mode turns write a memory. On adds work-mode (tool-using) turns too. Off by default: in work mode the longest sentence picked is usually code or a command, not something she said.',
+        memoryReload: 'Reload',
+        memoryReloaded: 'Reloaded · {n} entries in all.',
+        memoryUnreadable: 'The memory directory could not be read, so this page is empty for now.',
+        memoryCount: '{n}',
+        memoryDepth: 'Keep up to',
+        memoryDepthSave: 'Save',
+        memoryDepthHint: 'Storage depth only. It never changes how many entries are injected in a turn (3 at most). Lowering it trims once, oldest first, keeping pinned entries to the end.',
+        memoryDepthRange: '{min}–{max}',
+        memoryView: 'Open',
+        memoryHide: 'Close',
+        memoryClear: 'Clear',
+        memoryClearTitle: 'Clear long-term memory',
+        memoryClearAsk: 'Delete everything 「{name}」 remembers? The switches and the depth stay, but the memories themselves cannot be recovered.',
+        memoryCleared: 'Cleared what 「{name}」 remembered.',
+        memorySaved: 'Saved.',
+        memoryTrimmed: 'Saved, and {n} entries were dropped to fit the new limit.',
+        memoryBroken: 'This character\'s memory file could not be read (the content is broken). Clearing it once restores an empty file.',
+        memoryNone: 'This character has no memories yet.',
+        memoryKindEpisode: 'episode',
+        memoryKindStable: 'stable',
+        memoryKindEpisodeTitle: 'Episode: usable only inside the team that produced it',
+        memoryKindStableTitle: 'Stable: usable across sessions and teams',
+        memoryMakeStable: 'Mark stable',
+        memoryMakeEpisode: 'Back to episode',
+        memoryDelete: 'Delete',
+        memoryEdit: 'Edit',
+        memorySave: 'Save',
+        memoryCancel: 'Cancel',
+        memoryDeleted: 'Entry deleted.',
+        memorySourceTeam: 'from team 「{team}」',
+        memorySourceSolo: 'from a solo chat',
+        memoryEmptyText: 'The text cannot be empty.',
+        memoryOffHint: 'Switched off: this character neither reads nor writes.',
+        memoryGlobalOff: 'Master switch is off: this character neither reads nor writes.',
         teamMemoryClear: 'force-clear memory',
         teamMemoryClearHint: 'deletes every session\'s plot-memory files (summary + rounds) right now, regardless of retention — gone for good. Personas, team config and the ledger are untouched.',
         teamMemoryClearBtn: 'clear',
@@ -1223,6 +1303,7 @@ window.__ModuleLoader__.load({
       chevronLeft: 'IconChevronLeftOutlineRegular',
       chevronDown: 'IconChevronDownOutlineRegular',
       download: 'IconDownloadOutlineRegular',
+      trash: 'IconTrashOutlineRegular',
       archive: 'IconArchiveOutlineRegular',
       archived: 'IconArchiveCheckOutlineRegular',
       unarchive: 'IconUnarchiveOutlineRegular',
@@ -2018,15 +2099,28 @@ window.__ModuleLoader__.load({
        */
       const staleHost = item.state === undefined;
       /*
-       * Weight per answer. Only `ghost` is red: it is proven, it is ours, and it
-       * has a remedy. `foreign` means ONE thing and no more — a declaration this
-       * plugin cannot claim currently holds the id. The roster behind that
-       * verdict carries `id/name/description/order/broken` and nothing about
-       * who declared it, so the sentence must not name a file, a plugin, or the
-       * content behind the id; it says the id is taken and that the holder is
-       * unidentifiable HERE. `unknown` is the absence of proof in either
-       * direction. Both used to be drawn in the same red as 「未注册」, which is
-       * the claim this table exists to stop making.
+       * Weight per answer. `ghost` gets no line at all.
+       *
+       * It is provable (the fingerprint in `readDocument` says the holder is
+       * this plugin's previous instance), so it used to be painted red on every
+       * affected row. That was wrong for two reasons: it reads as 「插件坏了」
+       * while the persona itself still answers with the version the old instance
+       * registered, and the only remedy — restarting DSH — is not something the
+       * panel can do either. A permanent red line about a state the user cannot
+       * act on is noise, and it buries the states that do need action.
+       *
+       * What the user can act on is editing: that path fails and now says why
+       * (see `registrationFailure` in panel-ops.js). Silence here, one precise
+       * sentence at the moment it bites.
+       *
+       * `foreign` means ONE thing and no more — a declaration this plugin cannot
+       * claim currently holds the id. The roster behind that verdict carries
+       * `id/name/description/order/broken` and nothing about who declared it, so
+       * the sentence must not name a file, a plugin, or the content behind the
+       * id; it says the id is taken and that the holder is unidentifiable HERE.
+       * `unknown` is the absence of proof in either direction. Both used to be
+       * drawn in the same red as 「未注册」, which is the claim this table
+       * exists to stop making.
        */
       const stateLook =
         state === 'ours'
@@ -2034,7 +2128,6 @@ window.__ModuleLoader__.load({
           : staleHost
             ? [L.error, 'stateStaleHost']
             : {
-                ghost: [L.error, 'stateGhost'],
                 foreign: [L.warn, 'stateForeign'],
                 unknown: [L.hint, 'stateUnknown'],
               }[state] ?? null;
@@ -2300,16 +2393,27 @@ window.__ModuleLoader__.load({
         );
       };
       /*
-       * A stored entry the directory no longer carries — a renamed persona, a
-       * group tag nobody has. It cannot appear in either candidate list, so a
-       * picker-only editor would hide it while it keeps counting towards the
-       * team. Shown separately and removable, because "it is gone" is the one
-       * fact about this row the user cannot get anywhere else.
+       * Resolve a persona entry exactly the way the Host does (`expandSelection`
+       * in team.js): id first, then display name. The picker only ever stores
+       * ids, but a `teams.json` written by hand — or by anything that recorded
+       * the name — still resolves at run time, so an id-only check here would
+       * mark a member who is about to speak as gone, with 「删除」 right next to
+       * that verdict.
+       *
+       * What IS stale then: a persona the directory answers to neither way (the
+       * file was renamed *and* retitled), or a group tag nobody carries. Such an
+       * entry cannot appear in either candidate list, so a picker-only editor
+       * would hide it — shown here because this is the only place it can be
+       * deleted from. It counts towards nothing: the Host drops it from
+       * `members` and names it in the run's notices. This block used to claim it
+       * still occupied a slot, which was never true.
        */
+      const rowFor = (ref) =>
+        rows.find((row) => row.id === ref) ?? rows.find((row) => String(row.name ?? '') === ref);
       const stale = draft.selection.filter(
         (one) =>
           !(
-            (one.kind === 'persona' && rows.some((row) => row.id === one.ref)) ||
+            (one.kind === 'persona' && rowFor(one.ref) !== undefined) ||
             (one.kind === 'group' && groups.includes(one.ref))
           ),
       );
@@ -2317,10 +2421,9 @@ window.__ModuleLoader__.load({
        * The header counts PEOPLE, not picked rows: one group entry can carry
        * three wives, so `selection.length` printed 「1 人」 for a trio — the
        * exact number the user then corrected by hand. Resolved the same way
-       * the Host expands: `group:` equality for group entries, the id for
-       * persona entries (the picker only ever stores ids). A stale entry
-       * resolves to nothing here, which is consistent with the grey block
-       * below that says it is gone.
+       * the Host expands: `group:` equality for group entries, id-then-name
+       * for persona entries. A stale entry resolves to nothing here, which is
+       * consistent with the grey block below that says it is gone.
        */
       const picked = new Set();
       for (const one of draft.selection) {
@@ -2328,8 +2431,9 @@ window.__ModuleLoader__.load({
           for (const row of rows) {
             if (one.ref !== '' && groupOf(row) === one.ref) picked.add(row.id);
           }
-        } else if (rows.some((row) => row.id === one.ref)) {
-          picked.add(one.ref);
+        } else {
+          const hit = rowFor(one.ref);
+          if (hit !== undefined) picked.add(hit.id);
         }
       }
       const named = String(draft.name ?? '') !== '';
@@ -2614,20 +2718,343 @@ window.__ModuleLoader__.load({
                   onChange: (next) => onDefault(entry, next),
                 })
                 : null,
-              h(
-                Btn,
-                { variant: 'toolbar', icon: h(Icon, { name: 'settings' }), disabled: busy, onClick: () => onOpen(entry) },
-                t('teamEdit'),
-              ),
-              h(
-                Btn,
-                { variant: 'toolbar', disabled: busy, onClick: () => onRemove(entry.name) },
-                t('teamRemove'),
-              ),
+              h(Btn, {
+                variant: 'toolbar',
+                size: 'sm',
+                icon: h(Icon, { name: 'settings', size: 16 }),
+                title: t('teamEdit'),
+                'aria-label': t('teamEdit'),
+                disabled: busy,
+                style: { padding: '0 6px' },
+                onClick: () => onOpen(entry),
+              }),
+              h(Btn, {
+                variant: 'toolbar',
+                size: 'sm',
+                icon: h(Icon, { name: 'trash', size: 16 }),
+                title: t('teamRemove'),
+                'aria-label': t('teamRemove'),
+                disabled: busy,
+                style: { padding: '0 6px' },
+                onClick: () => onRemove(entry.name),
+              }),
             ),
             h(TeamPreview, { preview: entry.preview, t }),
           );
         }),
+      );
+    }
+
+    /**
+     * The Memory tab: what each character carries between sessions.
+     *
+     * A tab of its own rather than a section of Settings, for the same reason
+     * the team directory is one: Settings is 「one row, one switch」 and this is
+     * a list of people with per-character content hanging off it. The parts
+     * that ARE settings — the master switch, each character's own switch, the
+     * storage depth — are drawn in that same row language.
+     *
+     * Two facts the UI states instead of hiding:
+     *   - clearing is not switching off: the content goes, the settings stay;
+     *   - depth is not injection: a character may keep 200 and still send 3.
+     * A user who confuses either one will ask for the wrong fix.
+     */
+    function MemoryTab({
+      memory,
+      t,
+      busy,
+      onReload,
+      onGlobal,
+      onCapture,
+      onPersona,
+      onDepth,
+      onLoadEntries,
+      onClear,
+      onEdit,
+      onRemove,
+    }) {
+      const loaded = memory !== null && memory.ok === true;
+      const globalOn = loaded && memory.globalEnabled === true;
+      const captureOn = loaded && memory.captureToolTurns === true;
+      const limits = loaded ? memory.limits ?? {} : {};
+      const min = Number(limits.minMaxEntries) || 1;
+      const max = Number(limits.maxMaxEntries) || 200;
+      const [openId, setOpenId] = React.useState(null);
+      const [detail, setDetail] = React.useState(null);
+      const [reading, setReading] = React.useState(false);
+      const [depth, setDepth] = React.useState({});
+      const [editing, setEditing] = React.useState(null);
+
+      /*
+       * The list is fetched when a row is opened, not with the page: a hundred
+       * personas with twenty entries each is two thousand rows the panel would
+       * read to draw fourteen closed cards.
+       */
+      const readEntries = async (id) => {
+        setReading(true);
+        try {
+          setDetail(await onLoadEntries(id));
+        } catch (failure) {
+          setDetail({ ok: false, error: String(failure?.message ?? failure) });
+        } finally {
+          setReading(false);
+        }
+      };
+
+      const toggle = async (id) => {
+        setEditing(null);
+        if (openId === id) {
+          setOpenId(null);
+          setDetail(null);
+          return;
+        }
+        setOpenId(id);
+        setDetail(null);
+        await readEntries(id);
+      };
+
+      const entryTextStyle = { fontSize: '13px', lineHeight: '1.55' };
+
+      const renderEntry = (row, entry) => {
+        const source = entry.source ?? {};
+        const where =
+          source.kind === 'team'
+            ? t('memorySourceTeam').replace('{team}', String(source.team ?? '—'))
+            : source.kind === 'solo'
+              ? t('memorySourceSolo')
+              : '';
+        const stable = entry.kind === 'stable';
+        const isEditing = editing !== null && editing.entryId === entry.id;
+        return h(
+          'div',
+          { key: entry.id, style: { ...L.card, gap: '4px' } },
+          h(
+            'div',
+            { style: L.bar },
+            h(
+              'span',
+              {
+                style: L.meta,
+                title: stable ? t('memoryKindStableTitle') : t('memoryKindEpisodeTitle'),
+              },
+              stable ? t('memoryKindStable') : t('memoryKindEpisode'),
+            ),
+            where === '' ? null : h('span', { style: L.meta }, where),
+            h('span', { style: L.meta }, new Date(entry.at).toLocaleDateString()),
+            h('span', { style: L.push }),
+            isEditing
+              ? null
+              : h(
+                Btn,
+                {
+                  variant: 'toolbar',
+                  disabled: busy,
+                  onClick: () => setEditing({ id: row.id, entryId: entry.id, text: entry.text }),
+                },
+                t('memoryEdit'),
+              ),
+            isEditing
+              ? null
+              : h(
+                Btn,
+                {
+                  variant: 'toolbar',
+                  disabled: busy,
+                  onClick: async () => {
+                    await onEdit(row.id, {
+                      entryId: entry.id,
+                      kind: stable ? 'episode' : 'stable',
+                    });
+                    await readEntries(row.id);
+                  },
+                },
+                stable ? t('memoryMakeEpisode') : t('memoryMakeStable'),
+              ),
+            isEditing
+              ? null
+              : h(
+                Btn,
+                {
+                  variant: 'toolbar',
+                  disabled: busy,
+                  onClick: async () => {
+                    await onRemove(row.id, entry.id);
+                    await readEntries(row.id);
+                  },
+                },
+                t('memoryDelete'),
+              ),
+          ),
+          isEditing
+            ? h(
+              'div',
+              { style: L.bar },
+              h('input', {
+                style: { ...L.input, flex: '1 1 320px' },
+                value: editing.text,
+                disabled: busy,
+                onChange: (event) => setEditing({ ...editing, text: event.target.value }),
+              }),
+              h(
+                Btn,
+                {
+                  variant: 'primary',
+                  disabled: busy || editing.text.trim() === '',
+                  onClick: async () => {
+                    const ok = await onEdit(row.id, { entryId: entry.id, text: editing.text });
+                    if (ok) {
+                      setEditing(null);
+                      await readEntries(row.id);
+                    }
+                  },
+                },
+                t('memorySave'),
+              ),
+              h(Btn, { variant: 'toolbar', disabled: busy, onClick: () => setEditing(null) }, t('memoryCancel')),
+            )
+            : h('span', { style: entryTextStyle }, entry.text),
+        );
+      };
+
+      const renderRow = (row) => {
+        const shown = depth[row.id] === undefined ? String(row.maxEntries) : depth[row.id];
+        const wanted = Number(shown);
+        const valid =
+          shown !== '' && Number.isFinite(wanted) && wanted >= min && wanted <= max && wanted === Math.trunc(wanted);
+        const opened = openId === row.id;
+        return h(
+          'div',
+          { key: row.id, style: L.card },
+          h(
+            'div',
+            { style: L.bar },
+            h('span', { style: { fontWeight: 500 } }, row.id),
+            h('span', { style: L.meta }, t('memoryCount').replace('{n}', String(row.count))),
+            h('span', { style: L.push }),
+            h('input', {
+              type: 'number',
+              min,
+              max,
+              title: t('memoryDepthHint'),
+              style: { ...L.input, width: '72px' },
+              value: shown,
+              disabled: busy,
+              onChange: (event) => setDepth({ ...depth, [row.id]: event.target.value }),
+            }),
+            h(Btn, {
+              variant: 'toolbar',
+              size: 'sm',
+              icon: h(Icon, { name: 'check', size: 16 }),
+              title: t('memoryDepthSave'),
+              'aria-label': t('memoryDepthSave'),
+              disabled: busy || valid !== true || wanted === row.maxEntries,
+              style: { padding: '0 6px' },
+              onClick: () => onDepth(row.id, wanted),
+            }),
+            /*
+             * The row is a fixed ladder of controls: name, count, depth, then
+             * three pictograms. The state sentence (「这个角色已关闭…」) used to be
+             * inline here, and because it is only present in one of the two
+             * states, flipping a switch re-flowed the whole row — 查看/清空
+             * dropped to a second line, every card below moved. It is the
+             * switch's tooltip now: same information, constant geometry.
+             */
+            h(SwitchBox, {
+              checked: row.enabled === true,
+              disabled: busy || loaded !== true,
+              title:
+                row.enabled !== true
+                  ? t('memoryOffHint')
+                  : globalOn
+                    ? t('memoryGlobalHint')
+                    : t('memoryGlobalOff'),
+              onChange: (next) => onPersona(row.id, next),
+            }),
+            h(Btn, {
+              variant: 'toolbar',
+              size: 'sm',
+              icon: h(EyeIcon, null),
+              title: opened ? t('memoryHide') : t('memoryView'),
+              'aria-label': opened ? t('memoryHide') : t('memoryView'),
+              disabled: busy || reading,
+              style: { padding: '0 6px' },
+              onClick: () => toggle(row.id),
+            }),
+            h(Btn, {
+              variant: 'toolbar',
+              size: 'sm',
+              icon: h(Icon, { name: 'trash', size: 16 }),
+              title: t('memoryClear'),
+              'aria-label': t('memoryClear'),
+              disabled: busy || row.count === 0,
+              style: { padding: '0 6px' },
+              onClick: () => onClear(row),
+            }),
+          ),
+          row.broken === true ? h('span', { style: L.hint }, t('memoryBroken')) : null,
+          opened
+            ? reading
+              ? h('span', { style: L.hint }, '…')
+              : detail === null
+                ? null
+                : detail.ok !== true
+                  ? h('span', { style: L.hint }, String(detail.error ?? ''))
+                  : (detail.entries ?? []).length === 0
+                    ? h('span', { style: L.hint }, t('memoryNone'))
+                    : h(
+                      'div',
+                      { style: L.list },
+                      // Newest first: the panel is read top-down and the line
+                      // a user is looking for is almost always a recent one.
+                      (detail.entries ?? []).slice().reverse().map((entry) => renderEntry(row, entry)),
+                    )
+            : null,
+        );
+      };
+
+      return h(
+        'div',
+        { style: L.list },
+        h(
+          SettingRow,
+          { title: t('memoryTitle'), hint: t('memoryHint') },
+          loaded
+            ? h(
+              'span',
+              { style: L.meta },
+              t('memoryCount').replace(
+                '{n}',
+                String((memory.rows ?? []).reduce((sum, row) => sum + (row.count ?? 0), 0)),
+              ),
+            )
+            : null,
+          h(Btn, { variant: 'toolbar', icon: h(Icon, { name: 'refresh' }), disabled: busy, onClick: onReload }, t('memoryReload')),
+        ),
+        h(
+          SettingRow,
+          { title: t('memoryGlobal'), hint: t('memoryGlobalHint') },
+          h(SwitchBox, {
+            checked: globalOn,
+            disabled: busy || loaded !== true,
+            onChange: (next) => onGlobal(next),
+          }),
+        ),
+        h(
+          SettingRow,
+          { title: t('memoryCapture'), hint: t('memoryCaptureHint') },
+          h(SwitchBox, {
+            checked: captureOn,
+            disabled: busy || loaded !== true || globalOn !== true,
+            onChange: (next) => onCapture(next),
+          }),
+        ),
+        h(
+          'span',
+          { style: L.hint },
+          t('memoryDepthRange').replace('{min}', String(min)).replace('{max}', String(max)),
+        ),
+        loaded ? null : h('span', { style: L.hint }, memory?.error ?? t('memoryUnreadable')),
+        ...((loaded ? memory.rows ?? [] : []).map((row) => renderRow(row))),
       );
     }
 
@@ -3147,6 +3574,16 @@ window.__ModuleLoader__.load({
         groups = allGroups;
       }
       const selectedCount = batches.length;
+      /*
+       * While a search is running, no group may fold.
+       *
+       * Folding state belongs to browsing, not to searching: a hit inside a
+       * collapsed group would render into nothing, and a search that answers
+       * 「没有匹配」 because the answer is one group down is worse than no
+       * search at all. This mattered less when every group opened by default;
+       * it is the default now, so the guard has to exist.
+       */
+      const groupFolded = (key) => query.trim() === '' && groupCollapsed[key] === true;
       return h(
         'div',
         { style: L.list },
@@ -3221,15 +3658,15 @@ window.__ModuleLoader__.load({
               {
                 type: 'button',
                 style: L.groupHead,
-                'aria-expanded': groupCollapsed[group.key] !== true,
+                'aria-expanded': !groupFolded(group.key),
                 onClick: () => onToggleGroup(group.key),
               },
-              h(Icon, { name: groupCollapsed[group.key] === true ? 'chevronRight' : 'chevronDown' }),
+              h(Icon, { name: groupFolded(group.key) ? 'chevronRight' : 'chevronDown' }),
               h(Icon, { name: 'folder', size: 14 }),
               h('span', { style: L.groupLabel }, group.label === '' ? t('ungrouped') : group.label),
               h('span', { style: L.groupCount }, String(group.rows.length)),
             ),
-            groupCollapsed[group.key] === true
+            groupFolded(group.key)
               ? null
               : group.rows.map((item) =>
                   h(
@@ -3338,6 +3775,15 @@ window.__ModuleLoader__.load({
       const [hiddenOpen, setHiddenOpen] = React.useState(false);
       /** The team directory (`teamState`), or null before the first read. */
       const [team, setTeam] = React.useState(null);
+      /**
+       * The memory directory (`memoryState`), or null before the first read.
+       *
+       * Same contract as `team`: a failed read sets `{ ok: false, error }` so
+       * the tab says "cannot read" instead of drawing an empty list, which
+       * would claim "nothing is stored" — a different, and wrong, statement.
+       */
+      const [memory, setMemory] = React.useState(null);
+      const [memoryBusy, setMemoryBusy] = React.useState(false);
       /** The team being edited, or null when the editor is closed. */
       const [teamDraft, setTeamDraft] = React.useState(null);
       /**
@@ -3505,6 +3951,100 @@ window.__ModuleLoader__.load({
         },
         [t, setNote, load],
       );
+
+      /* ---------------------------------------------------- long-term memory */
+
+      const loadMemory = React.useCallback(async () => {
+        try {
+          setMemory(await post({ op: 'memoryState' }));
+        } catch (failure) {
+          setMemory({ ok: false, error: String(failure?.message ?? failure) });
+        }
+      }, []);
+
+      /**
+       * One memory write at a time.
+       *
+       * Every reply is followed by a re-read rather than patched from the
+       * payload: a write can trim (lowering the depth), delete a file (clear)
+       * and change a switch, and the panel draws all three from one shape.
+       * Patching that shape locally is how the count and the list drift apart.
+       */
+      const memoryWrite = React.useCallback(
+        async (request, done) => {
+          setMemoryBusy(true);
+          try {
+            const payload = await post(request);
+            await loadMemory();
+            if (typeof done === 'function') setNote({ kind: 'ok', text: done(payload) });
+            return payload;
+          } catch (failure) {
+            setNote({ kind: 'error', text: String(failure?.message ?? failure) });
+            return null;
+          } finally {
+            setMemoryBusy(false);
+          }
+        },
+        [loadMemory, setNote],
+      );
+
+      const loadMemoryEntries = React.useCallback(async (id) => post({ op: 'memoryEntries', id }), []);
+
+      const editMemoryEntry = React.useCallback(
+        async (id, patch) => {
+          const payload = await memoryWrite({ op: 'memoryEdit', id, ...patch });
+          if (payload === null || payload.ok !== true) return false;
+          // The open list is refreshed in place: the tab keeps its own copy of
+          // the entries, so a write the directory accepted would otherwise stay
+          // invisible until the row was closed and reopened.
+          return true;
+        },
+        [memoryWrite],
+      );
+
+      const removeMemoryEntry = React.useCallback(
+        async (id, entryId) => {
+          const payload = await memoryWrite({ op: 'memoryRemove', id, entryId }, () => t('memoryDeleted'));
+          return payload !== null && payload.ok === true;
+        },
+        [memoryWrite, t],
+      );
+
+      /**
+       * Wipe one character's memories — content only.
+       *
+       * Deliberately NOT the same call as switching her off: the panel says
+       * "switches and depth stay" in the confirmation, and that sentence is
+       * only true because this op touches the store and nothing else.
+       */
+      const clearMemoryFor = React.useCallback(
+        async (id, name) =>
+          memoryWrite({ op: 'memoryClear', id }, () =>
+            t('memoryCleared').replace('{name}', String(name ?? id))),
+        [memoryWrite, t],
+      );
+
+      /**
+       * The memory tab's 「重新读取」 — the same contract as the roster tab's
+       * 「刷新」: one request, then one notice saying what came back.
+       *
+       * It used to re-read silently. On a page whose numbers already matched
+       * the disk, that is indistinguishable from a dead button, and the only
+       * way to find out was to go look at the file.
+       */
+      const reloadMemory = React.useCallback(async () => {
+        setMemoryBusy(true);
+        try {
+          const payload = await post({ op: 'memoryState' });
+          setMemory(payload);
+          const total = (payload?.rows ?? []).reduce((sum, row) => sum + (row.count ?? 0), 0);
+          setNote({ kind: 'ok', text: t('memoryReloaded').replace('{n}', String(total)) });
+        } catch (failure) {
+          setNote({ kind: 'error', text: String(failure?.message ?? failure) });
+        } finally {
+          setMemoryBusy(false);
+        }
+      }, [setNote, t]);
 
       /**
        * Flip the capability switch.
@@ -3721,10 +4261,11 @@ window.__ModuleLoader__.load({
         void loadRoster();
         void loadHidden();
         void loadTeam();
+        void loadMemory();
         post({ op: 'updateCheck' })
           .then((payload) => setUpdate(payload))
           .catch((failure) => setUpdate({ error: String(failure?.message ?? failure) }));
-      }, [load, loadRoster, loadHidden, loadTeam]);
+      }, [load, loadRoster, loadHidden, loadTeam, loadMemory]);
 
       /*
        * The poll behind the progress window.
@@ -4667,6 +5208,33 @@ window.__ModuleLoader__.load({
        * paging on starts from page 1 (that is what the switch does) and would
        * otherwise sit on page 1 with the default three pages away.
        */
+      /*
+       * First paint: every group folds away except the one holding the default.
+       *
+       * The roster used to open fully expanded, so on a machine with eight
+       * groups the rows the user actually came to look at started below the
+       * fold. The default row is the shortest path to what this page is about,
+       * so it is the one thing left open. Runs once, and only when a default
+       * exists: a roster with no default has no "the one to show" and is left
+       * exactly as it was.
+       */
+      const seededRef = React.useRef(false);
+      React.useEffect(() => {
+        if (seededRef.current || data === null) return;
+        const target = data.files.find((file) => file.id === data.defaultId);
+        if (target === undefined) return;
+        seededRef.current = true;
+        const field = groupOf(target);
+        const openKey = field === '' ? UNGROUPED : field;
+        const next = {};
+        for (const file of data.files) {
+          const name = groupOf(file);
+          const key = name === '' ? UNGROUPED : name;
+          if (key !== openKey) next[key] = true;
+        }
+        setGroupCollapsed(next);
+      }, [data]);
+
       const revealRef = React.useRef('');
       React.useEffect(() => {
         const target = data === null ? undefined : data.files.find((file) => file.id === data.defaultId);
@@ -4829,10 +5397,39 @@ window.__ModuleLoader__.load({
             : null,
       };
 
+      /**
+       * The memory tab's props — kept out of `shared` for the same reason the
+       * team tab's are: it is a peer of Settings, not a section inside it.
+       */
+      const memoryProps = {
+        memory,
+        t,
+        busy: memoryBusy === true || busy === true,
+        onReload: reloadMemory,
+        onGlobal: (next) => memoryWrite({ op: 'memorySet', enabled: next }, () => t('memorySaved')),
+        onCapture: (next) =>
+          memoryWrite({ op: 'memorySet', captureToolTurns: next }, () => t('memorySaved')),
+        onPersona: (id, next) =>
+          memoryWrite({ op: 'memorySet', persona: id, personaEnabled: next }, () => t('memorySaved')),
+        onDepth: (id, maxEntries) =>
+          memoryWrite({ op: 'memorySet', persona: id, maxEntries }, (payload) => {
+            const dropped = payload?.trimmed?.dropped ?? 0;
+            return dropped > 0
+              ? t('memoryTrimmed').replace('{n}', String(dropped))
+              : t('memorySaved');
+          }),
+        onLoadEntries: loadMemoryEntries,
+        onEdit: editMemoryEntry,
+        onRemove: removeMemoryEntry,
+        onClear: (row) => setDialog({ kind: 'memoryClear', id: row.id }),
+      };
+
       const body =
-        tab === 'team'
-          ? h(TeamTab, teamProps)
-          : tab === 'settings'
+        tab === 'memory'
+          ? h(MemoryTab, memoryProps)
+          : tab === 'team'
+            ? h(TeamTab, teamProps)
+            : tab === 'settings'
             ? h(SettingsTab, shared)
             : h(WivesTab, {
               ...shared,
@@ -4925,6 +5522,18 @@ window.__ModuleLoader__.load({
               },
               h(Icon, { name: 'roster' }),
               t('tabTeam'),
+            ),
+            h(
+              'button',
+              {
+                type: 'button',
+                role: 'tab',
+                'aria-selected': tab === 'memory',
+                style: { ...L.tabBtn, ...(tab === 'memory' ? L.tabActive : null) },
+                onClick: () => setTab('memory'),
+              },
+              h(Icon, { name: 'archive' }),
+              t('tabMemory'),
             ),
             h(
               'button',
@@ -5045,6 +5654,20 @@ window.__ModuleLoader__.load({
           onConfirm: async () => {
             setDialog(null);
             await unhideAll();
+          },
+        }),
+        h(Confirm, {
+          open: dialog !== null && dialog.kind === 'memoryClear',
+          title: t('memoryClearTitle'),
+          description: t('memoryClearAsk').replace('{name}', String(dialog?.id ?? '')),
+          acknowledgeLabel: t('memoryClear'),
+          confirmLabel: t('memoryClear'),
+          cancelLabel: t('cancel'),
+          onCancel: () => setDialog(null),
+          onConfirm: async () => {
+            const id = dialog?.id;
+            setDialog(null);
+            if (typeof id === 'string' && id !== '') await clearMemoryFor(id, id);
           },
         }),
         h(Confirm, {

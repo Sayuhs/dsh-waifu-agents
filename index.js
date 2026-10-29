@@ -1,99 +1,112 @@
 /**
- * dsh-waifu-agents — Host half.
+ * dsh-waifu-agents — Host 半边。
  *
- * Scans one persona directory and registers every `*.md` in it as an agent
- * preset ("wife"). All presets share one capability list (`template.json`);
- * only the `@deepseek-ai/dsh-persona` row's `prefix` is replaced by the file's
- * markdown body, so the persona text lives in plain files while the tool set
- * comes from one place.
+ * 扫描一个人设目录，把其中每个 `*.md` 都注册成 agent 预设（"wife"）。
+ * 所有预设共用一份能力列表（`template.json`）；只有 `@deepseek-ai/dsh-persona`
+ * 那一行的 `prefix` 会被替换成文件里的 markdown 正文，因此人设文本放在
+ * 纯文本文件里，而工具集只有一处来源。
  *
- * Identity is the **id** (the file name), never the display name: `rename`
- * moves the file and re-registers it under the new id. `order` is assigned by
- * the host (`nextOrder`) unless a file already carries one. An id may be
- * Chinese (`ID_OK`), so a wife can be called `后藤一里` outright instead of
- * carrying a transliterated alias forever.
+ * 身份是 **id**（即文件名），绝不是显示名：`rename` 会移动文件并以新 id
+ * 重新注册。`order` 由 Host（`nextOrder`）分配，除非文件本身已带有一个。
+ * id 允许是中文（`ID_OK`），所以一个 wife 可以直接叫 `后藤一里`，而不必
+ * 永远背着一个音译别名。
  *
- * Operations, reachable two ways: the `/persona <json>` command (which needs
- * a session), and `POST /waifu-agents/api` carrying the same JSON body (which
- * needs only a loopback peer). The settings panel uses the route: that slot has
- * empty owner props, so it never receives a session id.
- *   list        the directory, every file, and which ids this plugin owns
- *   get         one wife, answer style included
- *   create      new file + registration; `id` may be blank (derived from `name`), `order` may be blank
- *   update      edit name / summary / answer style (id changes go through `rename`)
- *   rename      move a wife to a new id (the file name *is* the preset id)
- *   remove      unregister, then archive the file as `<id>.md.off`
- *   import      take a whole markdown file, front matter included, and store it
- *   export      return one file's exact text
- *   exportAll   return every file's exact text
- *   exportArchive  pack the chosen files (default: all) into one base64 `.zip`
- *   refresh     rescan the directory and adopt newly added files
- *   setDir      write `config.dir` back through the configEditor service
- *   setMode     switch personas between pure chat and the full utility toolset
- *   updateCheck which version runs, which one is installed, which one the registry has
- *   updateApply install the newest published version through the pluginManager service
+ * 操作有两条可达路径：`/persona <json>` 命令（需要会话），以及携带同样
+ * JSON 请求体的 `POST /waifu-agents/api`（只需要回环对端）。设置面板走的是
+ * 路由：那个插槽的 owner props 是空的，所以它永远收不到会话 id。
+ *   list        列出目录、每个文件，以及本插件拥有哪些 id
+ *   get         读取一个 wife，含回答风格
+ *   create      新建文件 + 注册；`id` 可留空（从 `name` 推导），`order` 可留空
+ *   update      编辑名字 / 简介 / 回答风格（改 id 走 `rename`）
+ *   rename      把一个 wife 移到新 id（文件名 *就是* 预设 id）
+ *   remove      先注销，再把文件归档为 `<id>.md.off`
+ *   import      收下整份 markdown 文件（含 front matter）并存起来
+ *   export      返回一个文件的原样文本
+ *   exportAll   返回所有文件的原样文本
+ *   exportArchive  把选中的文件（默认全部）打包成一个 base64 `.zip`
+ *   refresh     重新扫描目录并收编新增的文件
+ *   setDir      通过 configEditor 服务把 `config.dir` 写回去
+ *   setMode     在纯聊天与完整工具集之间切换人设
+ *   updateCheck 哪个版本在运行、哪个已安装、注册表里是哪个
+ *   updateApply 通过 pluginManager 服务安装最新已发布版本
  *
- * The id is invisible. It only has to be unique on disk, so it is the slug of
- * the display name and `update` MOVES the file when that name changes: the file
- * name, the `name` field and the row title are then one and the same thing, and
- * no screen ever asks a user for an id. A name that no file name can carry
- * (spaces, punctuation, `/`) keeps this by being slugified instead.
+ * id 是不可见的。它只需要在磁盘上唯一，所以它是显示名的 slug，而当显示名
+ * 变化时 `update` 会移动文件：这样文件名、`name` 字段与行标题就是同一样
+ * 东西，任何界面都不必让用户输入 id。文件名装不下的名字（空格、标点、
+ * `/`）则通过 slug 化保住这一点。
  *
- * `updateApply` is what makes a published fix reachable without a shell: the
- * panel posts it, `latestVersion` asks the registry, and the install goes
- * through the very service the Plugins page uses. Three layers, tried in
- * order:
+ * `updateApply` 让已发布的修复不必开 shell 就能到达：面板发它，
+ * `latestVersion` 询问注册表，安装走的正是 Plugins 页面所用的那个服务。
+ * 三层方案，按顺序尝试：
  *
- * 1. TARBALL (updates of an installed package): the new version's tarball URL
- *    is the one spec shape the manager's HMR precheck cannot match by name —
- *    its package name is only known after pnpm runs — so the install reaches
- *    pnpm over the installed copy, and the HMR re-composition replaces the
- *    running plugin in place. No removal, no restart in the success path.
- *    This also rewrites the profile's saved dependency from a version range
- *    to the exact URL; the next update's URL differs again, so nothing is
- *    ever refused as already-installed on this road twice.
- * 2. NAME (fresh installs, and the two-step's second half): the plain
- *    `name@version` spec keeps a fresh install's saved dependency a clean
- *    range.
- * 3. TWO-STEP (fallback if the tarball road is somehow refused with
- *    `already-installed`): remove the running bundle, then install the new
- *    version from the same fiber — a resolved promise never interrupts the
- *    fiber that awaited it. Whether the fiber survives its own removal is
- *    what real-machine use finds out; every failure is caught and reported
- *    with the manual remove-then-install on the Plugins page as the last
- *    resort.
+ * 1. TARBALL（已安装包的更新）：新版本的 tarball URL 是管理器的 HMR 预检
+ *    唯一无法按名字匹配的 spec 形态——包名要到 pnpm 跑完才知道——所以安装
+ *    借助已安装副本到达 pnpm，HMR 重组会把运行中的插件原地替换。成功路径
+ *    上无需移除、无需重启。这一路还会把 profile 保存的依赖从版本范围改写成
+ *    精确 URL；下一次更新的 URL 又不同，因此这条路不会被以"已安装"为由
+ *    二次拒绝。
+ * 2. NAME（全新安装，以及两步法的后半）：朴素的 `name@version` spec 让
+ *    全新安装保存的依赖保持为干净的范围。
+ * 3. TWO-STEP（tarball 一路因 `already-installed` 被拒时的后备）：先移除
+ *    运行中的 bundle，再从同一个 fiber 安装新版本——已 resolve 的 promise
+ *    永远不会打断等待它的那个 fiber。fiber 能否挺过对自己的移除，要靠真机
+ *    使用来验证；每个失败都会被捕获并上报，最后的手段是 Plugins 页面上的
+ *    手动"先移除再安装"。
  *
- * The personas directory and `teams.json` live outside the package, so no
- * path through any layer — success, half-done, or failure — touches user
- * data.
+ * 人设目录与 `teams.json` 位于包外，所以任何一层——成功、半途还是失败——
+ * 都不会碰用户数据。
  *
- * No configuration is required: `resolveDir` picks the directory from the row
- * config, then from `<home>/personas`, then — on a machine that does not have it
- * yet — seeds that path from this package's own `personas/`, so the wives the
- * user edits are never the ones an upgrade would overwrite; only then does it
- * fall back to the packaged directory itself. `<home>` is `$DSH_HOME`, else the
- * system home plus `.dsh`: those variables are shell facts, and the Host process
- * a plugin runs in need not export them.
+ * 无需任何配置：`resolveDir` 先取行配置里的目录，再取 `<home>/personas`，
+ * 然后在还没有这个目录的机器上——用本包自带的 `personas/` 播种该路径，
+ * 这样用户编辑的 wife 绝不是升级时会覆盖的那份；只有到那时才退回包内目录。
+ * `<home>` 是 `$DSH_HOME`，否则是系统主目录加 `.dsh`：那些变量是 shell
+ * 层面的事实，插件所在的 Host 进程不必导出它们。
  *
- * Public contracts used here:
+ * Host 半边现在住在哪里（2026-10 拆分；每次搬动都是逐字搬，只改了闭包边界）：
+ *   - index.js        本文件：纯人设层（有导出、有测试）、目录内核、会话
+ *                     身份、记忆写入路径，以及调用下面各模块的接线
+ *   - panel-ops.js    注册引擎（`scan`/`registerOne`）、面板 op 表、团队预设
+ *                     同步——即过去「团队即预设」一节的内容，外加面板 API
+ *   - memory-ops.js   人设长记忆（身份快照、团队记忆视图）+ 面板的
+ *                     memory / team / purge op 实现（2026-10-28 P3 拆出）
+ *   - team-mode.js    团队模式的面板目录（teamState / teamSet /
+ *                     teamMemoryClear）（2026-10-28 P3 拆出）
+ *   - commands.js     三个 `/waifu-*` 命令
+ *   - http-route.js   面板的回环 POST 路由
+ *   - self-update.js  版本检查、tarball 安装、进度推送
+ *   - package-meta.js PACKAGE_DIR / PACKAGE_NAME / RUNNING_VERSION
+ *   - text.js         `oneLine`（与 `team.js` 里的不是同一个函数）
+ *   - tool-filter.js  运行时工具闸门（chat/team 封禁）
+ *   - team-*.js       团队运行时、其决策层、快照与记忆
+ *
+ * 这里用到的公共契约：
  *   - `ctx.agentPresets.register` / `.list`  (service `agentPresets`)
  *   - `ctx.commands.register`                (service `commands`)
- *   - `ctx.get('configEditor')`              (service `configEditor`, optional)
- *   - `ctx.webServer.register`                (service `webServer`, lazily injected)
- *   - `node:fs` for the files themselves      (same as the shipped bundle example)
- * Nothing outside `node:` builtins is imported except `@deepseek-ai/schemastery`,
- * which the `Config` export needs and which the manifest declares as a dependency.
- * No peer dependency is declared on purpose: the plugin manager refuses an
- * install whose declared DSH peer range is unsatisfied, and none is needed.
+ *   - `ctx.get('configEditor')`              (service `configEditor`, 可选)
+ *   - `ctx.webServer.register`                (service `webServer`, 惰性注入)
+ *   - `node:fs` 负责文件本身                  (与随包的 bundle 示例相同)
+ * 除了 `@deepseek-ai/schemastery`（`Config` 导出需要它，清单里也声明为依赖）
+ * 之外，不导入任何 `node:` 内建模块之外的东西。
+ * 有意不声明 peer dependency：插件管理器会拒绝声明的 DSH peer 范围不满足的
+ * 安装，而这里也用不到。
  */
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import z from "@deepseek-ai/schemastery";
 import { installTeamRuntime } from "./team-runtime.js";
+import { createToolFilter } from "./tool-filter.js";
 import { buildZip } from "./zip.js";
+import { PACKAGE_DIR, PACKAGE_NAME, RUNNING_VERSION } from "./package-meta.js";
+import { refreshAssets } from "./seed-assets.js";
+import { installSelfUpdate } from "./self-update.js";
+import { installCommands } from "./commands.js";
+import { installHttpRoute } from "./http-route.js";
+import { installMemoryOps } from "./memory-ops.js";
+import { installPanelOps } from "./panel-ops.js";
+import { installTeamMode } from "./team-mode.js";
+import { oneLine } from "./text.js";
 import {
   TEAM_FILE,
   RUN_LOG_FILE,
@@ -107,395 +120,259 @@ import {
   defaultRenameFollow,
   defaultNamesTeam,
 } from "./team.js";
+import {
+  DEFAULT_MAX_ENTRIES,
+  ENTRY_MAX_CHARS,
+  MAX_MAX_ENTRIES,
+  MIN_MAX_ENTRIES,
+  appendEntry,
+  clearStore,
+  clampEntryText,
+  clampMaxEntries,
+  effectiveEnabled,
+  listStoredIds,
+  migratePersona,
+  personaConfigOf,
+  readConfig,
+  readStore,
+  recallEntries,
+  recentEntries,
+  renderMemoryBlock,
+  screenEntry,
+  trimToLimit,
+  updateConfig,
+  writeStore,
+} from "./persona-memory.js";
 
-/** Cordis plugin name. */
+/**
+ * 版本比较，重新导出以免包的公共接口面因更新机制搬到 `self-update.js` 而
+ * 改变。
+ */
+export { isNewer } from "./self-update.js";
+
+/** Cordis 插件名。 */
 export const name = "waifu-agents";
 /**
- * Every registry this plugin contributes to. `configEditor` (the directory and
- * the default persona) and `pluginManager` (the self-update) are both optional
- * and are reached through `ctx.get` / `ctx.inject`: a profile without them must
- * still get its personas.
+ * 本插件贡献到的所有注册表。`configEditor`（目录与默认人设）和
+ * `pluginManager`（自更新）都是可选的，通过 `ctx.get` / `ctx.inject` 访问：
+ * 缺少它们的 profile 也必须照常拿到自己的人设。
  */
 export const inject = ["agentPresets", "commands", "systemPrompt"];
 
-/** Row config schema. Declaring this is what gives the row a configure control. */
+/** 行配置 schema。声明它正是让该行获得配置控件的原因。 */
 export const Config = z.object({
   dir: z.string(),
   template: z.string(),
   registry: z.string(),
-  /** Off turns the mid-session switch notice off; see `withSwitchNotice`. */
+  /** 关闭后会话中途的切换提示不再出现；见 `withSwitchNotice`。 */
   switchNotice: z.boolean(),
   /**
-   * Off turns the per-turn identity snapshot off; see `identityNoticeOf`.
+   * 关闭后每回合的身份快照不再注入；见 `identityNoticeOf`。
    *
-   * On by default because it is the only channel that actually re-anchors a
-   * mid-session switch: the persona itself is a system prompt, and a model that
-   * has already answered twice as the previous wife defends those answers
-   * rather than re-reading the top of the prompt. See the measurement in
-   * `identityNoticeOf`.
+   * 默认开启，因为它是唯一能真正重新锚定会话中途切换的通道：人设本身是
+   * 系统提示词，而已经以上一位 wife 的身份回答过两次的模型会为自己的回答
+   * 辩护，而不是重读提示词开头。测量记录见 `identityNoticeOf`。
    */
   identityReminder: z.boolean(),
   /**
-   * On makes `/waifu-change` move the session's own preset label too; see
-   * `rememberSessionPreset`.
+   * 开启后 `/waifu-change` 也会把会话自己的预设标签一并移过去；见
+   * `rememberSessionPreset`。
    *
-   * The chip above a conversation renders `projectionValues.agentPreset`, and
-   * the platform refuses to move it for a session that has already started a
-   * turn (`agent-preset/locked`) — because moving it "for real" means remounting
-   * the whole preset tree, tools included. So switching a running session used
-   * to leave the label naming the wife the session was BORN with, which reads as
-   * "cut but the label did not change". This appends the selection event alone, which moves the
-   * label and nothing else; the persona itself is served by the override either
-   * way. Off leaves the label alone.
+   * 对话上方的 chip 渲染的是 `projectionValues.agentPreset`，而对一个已经
+   * 开始回合的会话，平台拒绝移动它（`agent-preset/locked`）——因为"真正"
+   * 移动意味着重新挂载整棵预设树，工具也包括在内。于是切换运行中的会话
+   * 曾让标签仍写着会话出生时的那个 wife，看上去就是"切了但标签没变"。
+   * 这个开关只追加选中事件本身，它只移动标签、别的不动；无论开关与否，
+   * 人设本身都由覆盖提供。关闭时标签不动。
    */
   syncSessionChip: z.boolean(),
 });
 
-/** This package's own directory — resources resolve from here, not from the profile. */
-const PACKAGE_DIR = fileURLToPath(new URL(".", import.meta.url));
-
-/** This package's own name, spelled the way the registry and the profile spell it. */
-const PACKAGE_NAME = "dsh-waifu-agents";
-
-/** Where a self-update asks for the newest version, unless the row overrides it. */
-const DEFAULT_REGISTRY = "https://registry.npmjs.org/";
-
-/** Bounded, so a wedged registry cannot hold a panel request open forever. */
-const LOOKUP_TIMEOUT_MS = 8000;
-
 /**
- * This copy's own version, read ONCE at load.
- *
- * Reading it once is the whole point: a self-update replaces
- * `node_modules/dsh-waifu-agents` on disk while this module stays loaded, so
- * the file on disk stops describing the code that is running. Only a value
- * captured here can tell "0.2.0 is installed, restart to actually get it" apart
- * from "0.2.0 is running".
- */
-const RUNNING_VERSION = readOwnVersion();
-
-/** @returns {string | null} the version of the copy on disk, or null if unreadable */
-function readOwnVersion() {
-  try {
-    const text = fs.readFileSync(
-      path.join(PACKAGE_DIR, "package.json"),
-      "utf8",
-    );
-    const version = JSON.parse(text).version;
-    return typeof version === "string" && version !== "" ? version : null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Is `candidate` a later release than `current`?
- *
- * Three numeric parts, and a prerelease sorts before its own release
- * (`1.0.0-rc.1` < `1.0.0`). Anything unparseable answers `false`: an odd version
- * string must never turn into an update prompt.
- * @param {unknown} candidate
- * @param {unknown} current
- * @returns {boolean}
- */
-export function isNewer(candidate, current) {
-  const parse = (value) => {
-    const match = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/.exec(
-      String(value ?? "").trim(),
-    );
-    if (match === null) return null;
-    return {
-      nums: [Number(match[1]), Number(match[2]), Number(match[3])],
-      pre: match[4] ?? "",
-    };
-  };
-  const a = parse(candidate);
-  const b = parse(current);
-  if (a === null || b === null) return false;
-  for (let index = 0; index < 3; index += 1) {
-    if (a.nums[index] !== b.nums[index]) return a.nums[index] > b.nums[index];
-  }
-  if (a.pre === b.pre) return false;
-  if (a.pre === "") return true;
-  if (b.pre === "") return false;
-  return a.pre > b.pre;
-}
-
-/**
- * The newest version the registry publishes for this package.
- *
- * Only `dist-tags.latest` is read, through the abbreviated metadata document, so
- * one small GET answers it. `AbortSignal.timeout` keeps a black-holed
- * connection from hanging the panel: this is called from a click handler.
- * @param {string} [registry] registry base URL; the row config may override it
- * @returns {Promise<{ version: string, registry: string }>}
- */
-async function latestVersion(registry) {
-  const base = String(registry ?? "").trim() || DEFAULT_REGISTRY;
-  if (typeof fetch !== "function")
-    throw new Error(`这个 Node 没有 fetch，只能手动装：${PACKAGE_NAME}@latest`);
-  const url = new URL(PACKAGE_NAME, base.endsWith("/") ? base : `${base}/`)
-    .href;
-  const response = await fetch(url, {
-    headers: { accept: "application/vnd.npm.install-v1+json" },
-    signal: AbortSignal.timeout(LOOKUP_TIMEOUT_MS),
-  });
-  if (!response.ok)
-    throw new Error(`${base} 对 ${PACKAGE_NAME} 返回 HTTP ${response.status}`);
-  const meta = await response.json();
-  const latest = meta?.["dist-tags"]?.latest;
-  if (typeof latest !== "string" || latest === "")
-    throw new Error(`${base} 没有给出 dist-tags.latest`);
-  return { version: latest, registry: base };
-}
-
-/**
- * The tarball URL of a published version.
- *
- * This is the one spec shape the manager's HMR precheck CANNOT refuse with
- * `already-installed`: the precheck matches specs it can name before pnpm
- * runs — a registry name, a local directory, or the exact git/tarball spec the
- * dependency was saved with — and a fresh tarball URL names a package only
- * after pnpm has fetched it. Installing version N+1 from its own tarball
- * therefore reaches pnpm over an installed version N, and the HMR
- * re-composition replaces the running plugin in place (the documented
- * behavior). The abbreviated packument names the URL authoritatively
- * (`dist.tarball`), so one small GET asks the registry; a registry that will
- * not answer falls back to the npm tarball path convention, which every
- * registry this plugin can be pointed at follows
- * (`<base>/<name>/-/<name>-<version>.tgz`). Constructing never throws, so this
- * helper always returns a usable URL.
- * @param {string} [registry] registry base URL; the row config may override it
- * @param {string} version exact published version
- * @returns {Promise<string>}
- */
-async function tarballUrlOf(registry, version) {
-  const base = String(registry ?? "").trim() || DEFAULT_REGISTRY;
-  const construct = () =>
-    new URL(
-      `${PACKAGE_NAME}/-/${PACKAGE_NAME}-${version}.tgz`,
-      base.endsWith("/") ? base : `${base}/`,
-    ).href;
-  if (typeof fetch !== "function") return construct();
-  try {
-    const url = new URL(PACKAGE_NAME, base.endsWith("/") ? base : `${base}/`)
-      .href;
-    const response = await fetch(url, {
-      headers: { accept: "application/vnd.npm.install-v1+json" },
-      signal: AbortSignal.timeout(LOOKUP_TIMEOUT_MS),
-    });
-    if (!response.ok) return construct();
-    const meta = await response.json();
-    const tarball = meta?.versions?.[version]?.dist?.tarball;
-    return typeof tarball === "string" && tarball !== "" ? tarball : construct();
-  } catch {
-    return construct();
-  }
-}
-
-/**
- * The shared skeleton: a reserved name in the persona directory that is never a
- * wife. It is the frame a `template:`-using persona is poured into, with
- * `[[body]]` marking where her own text goes and `[[name]]` standing in for the
- * display name.
+ * 共享骨架：人设目录里的一个保留名，永远不会是一个 wife。它是使用
+ * `template:` 的人设被浇注进去的框架，`[[body]]` 标记她自己的文本放哪里，
+ * `[[name]]` 代表显示名。
  */
 const SKELETON_FILE = "_common.md";
 
-/** Names in the directory that are not wives. */
+/** 目录中不是 wife 的名字。 */
 const SKIP = new Set(["README.md", "_template.json", SKELETON_FILE]);
 
 /**
- * Our placeholders are deliberately NOT `{{…}}`.
+ * 我们的占位符刻意不用 `{{…}}`。
  *
- * `{{…}}` belongs to the prompt renderer: it resolves that syntax when the
- * system prompt is rendered, and it THROWS on any name it does not know —
- * `dsh-system-prompt` registers exactly provider/model/cwd. This row is
- * registered with `complete: true`, so the rendered prefix IS the whole system
- * prompt: one stray `{{char}}` would not degrade a paragraph, it would fail the
- * prompt and the session would not start.
+ * `{{…}}` 属于提示词渲染器：渲染系统提示词时它会解析那种语法，遇到任何
+ * 不认识的名字都会 THROW——`dsh-system-prompt` 恰好只注册了
+ * provider/model/cwd。这一行注册时带 `complete: true`，所以渲染出的前缀就是
+ * 整个系统提示词：一个多出来的 `{{char}}` 不会只让一段话降级，而是让提示词
+ * 整个失败、会话起不来。
  */
 const PROMPT_VARIABLES = new Set(["provider", "model", "cwd"]);
 
 /**
- * The prompt variable every persona row points at instead of literal text.
+ * 每个人设行都指向它（而不是字面文本）的提示词变量。
  *
- * It is deliberately NOT in `PROMPT_VARIABLES`: that set validates what a
- * *persona* is allowed to write. This name is written by the plugin itself, and
- * it is resolved by the provider registered in `apply`.
+ * 它刻意不在 `PROMPT_VARIABLES` 里：那个集合校验的是 *人设* 允许写什么。
+ * 这个名字由插件自己写入，由 `apply` 里注册的 provider 解析。
  */
 export const PERSONA_PLACEHOLDER = "{{waifu_persona}}";
 
 /**
- * Where the per-session overrides live.
+ * 每会话覆盖存放的位置。
  *
- * Inside the persona directory whenever that directory is writable, so this
- * plugin owns exactly ONE path on disk and an uninstall can be checked by
- * looking at it. `OVERRIDE_FILE` is only the fallback for a read-only
- * (in-package) directory. `LEGACY_OVERRIDE_FILE` is the same fallback under the
- * package's pre-rename name (`dsh-persona-waifu`): an install upgrading from
- * 0.3.x/0.4.x left its session overrides there, and `foldLegacyOverrides` folds
- * them into the current directory on first apply. Never write the legacy name.
+ * 只要人设目录可写就放在该目录内，于是本插件在磁盘上恰好只拥有一条路径，
+ * 卸载是否干净看一眼即可。`OVERRIDE_FILE` 只是只读（包内）目录时的后备。
+ * `LEGACY_OVERRIDE_FILE` 是同一个后备在包改名前（`dsh-persona-waifu`）的
+ * 名字：从 0.3.x/0.4.x 升级来的安装把会话覆盖留在了那里，`foldLegacyOverrides`
+ * 会在首次 apply 时把它们折进当前目录。永远不要写旧名。
  */
 const OVERRIDE_FILE = "dsh-waifu-agents.overrides.json";
 const LEGACY_OVERRIDE_FILE = "persona-waifu.overrides.json";
 const OVERRIDE_FILE_IN_DIR = "overrides.json";
 
 /**
- * Where the plugin remembers which capability shape personas run with.
+ * 插件记录人设以哪种能力形态运行的位置。
  *
- * Beside `teams.json` on purpose: the persona directory (or its read-only
- * fallback) is the one place this plugin owns, so "what is this install's
- * state" stays one directory rather than a second hidden location.
+ * 刻意放在 `teams.json` 旁边：人设目录（或其只读后备）是本插件唯一拥有的
+ * 地方，所以"这份安装的状态是什么"保持在同一个目录里，而不是第二个藏起来
+ * 的位置。
  */
 const MODE_FILE = "mode.json";
 
-/** Bounded so a long-lived install cannot accumulate dead session ids forever. */
+/** 有上限，免得长期使用的安装无限积累死掉的会话 id。 */
 const OVERRIDE_LIMIT = 500;
 
-/** The settings namespace the agent-preset registry stores `selectedDefault` in. */
+/** agent-preset 注册表存放 `selectedDefault` 的设置命名空间。 */
 const REGISTRY_NS = "agent-preset-registry";
 const PROMPT_VARIABLE_NAME = /^[a-z][a-z0-9_]*$/;
 
 /**
- * Where this plugin's presets sit in the registry's ONE global sort key.
+ * 本插件的预设落在注册表唯一全局排序键里的位置。
  *
- * The registry sorts every declaration it holds with
+ * 注册表用它持有的每一条声明按
  * `(a.order ?? Infinity) - (b.order ?? Infinity) || a.id.localeCompare(b.id)`
- * (`dsh-agent-preset-registry/lib/index.js`), and the shipped presets already
- * occupy 1..4. A persona file's `order:` is a position *inside this directory* —
- * the panel's drag-reorder writes 1..n and nothing else — so handing that number
- * straight to the registry put both families in the same band and the
- * new-task list read 后藤一里 / standard / 大肥鱼 / ptc / 托尔 … : built-in and custom
- * personas interleave. The offset is applied at registration ONLY, so the file keeps the
- * local order the panel edits while the roster reads built-in first, custom below.
+ * 排序（`dsh-agent-preset-registry/lib/index.js`），而随包预设已占用 1..4。
+ * 人设文件的 `order:` 是 *本目录之内* 的位置——面板拖拽排序只写 1..n——
+ * 所以把这个数直接交给注册表会让两族挤进同一段，新建任务列表读起来成了
+ * 后藤一里 / standard / 大肥鱼 / ptc / 托尔 …：内建与自定义人设交错。偏移只在
+ * 注册时施加，于是文件保留面板编辑的局部顺序，而花名册读作内建在前、
+ * 自定义在后。
  *
- * 10000 rather than 10: `order` is a bare sort key with no documented range, and
- * a band wide enough that no plausible hand-written number reaches it cannot put
- * a persona above a built-in by accident.
+ * 用 10000 而不是 10：`order` 是没有文档化范围的光秃排序键，一段宽到任何
+ * 合理手写数字都够不到的区间，才能保证人设不会意外排到内建之上。
  */
 export const PERSONA_ORDER_BASE = 10000;
 
 /**
- * The band team presets sort into — one whole band above the personas.
+ * 团队预设排序进入的区段——整个人设区段之上。
  *
- * A team is made of personas, so on the new-session page it belongs after
- * them rather than interleaved; and a hand-written persona `order:` would have
- * to exceed 10000 to reach this band, which {@link PERSONA_ORDER_BASE} exists
- * to make implausible.
+ * 团队由人设组成，所以在新建会话页它应排在它们之后而不是交错；而手写的
+ * 人设 `order:` 得超过 10000 才够到这个区段，{@link PERSONA_ORDER_BASE} 的
+ * 存在正是为了让这种事不可信。
  */
 export const TEAM_ORDER_BASE = 20000;
 
 /**
- * What every team preset's id starts with.
+ * 每个团队预设的 id 的开头。
  *
- * A team is not a file, so nothing in the persona directory can ever collide
- * with it by accident — and `teamNameForPreset` is how the runtime tells a
- * session that was BORN on a team from one that was switched onto it.
+ * 团队不是文件，所以人设目录里的任何东西都不会意外与它撞名——而
+ * `teamNameForPreset` 就是运行时区分"出生即在团队上的会话"与"后来切到
+ * 团队上的会话"的办法。
  */
 export const TEAM_PRESET_PREFIX = "团队-";
 
 /**
- * A legal preset id; the file name is the preset id.
+ * 合法的预设 id；文件名即预设 id。
  *
- * Unicode letters and digits, so a wife can be called `后藤一里` instead of
- * being forced to keep a transliterated alias. The registry puts *no* format
- * rule on `id` — the live code rejects only an empty id and a duplicate one —
- * so this pattern is ours, and its real job is to stay a legal *file name*.
- * Letters and digits already exclude `/ \ : * ? " < > |`, spaces and dots, and
- * refusing a leading `-` keeps an id from ever looking like an option.
+ * Unicode 字母与数字，所以 wife 可以直接叫 `后藤一里`，不必永远背着音译
+ * 别名。注册表对 `id` 没有任何格式要求——实际代码只拒绝空 id 与重复 id——
+ * 所以这个模式是我们自己的，它真正的职责是保持为一个合法的 *文件名*。
+ * 字母与数字已经排除了 `/ \ : * ? " < > |`、空格和点，而拒绝开头 `-` 则
+ * 保证 id 永远不会长得像选项。
  */
 export const ID_OK = /^[\p{L}\p{N}][\p{L}\p{N}-]*$/u;
 
 /*
- * Registration bookkeeping shared by EVERY live `apply()` of this plugin in the
- * same runtime process.
+ * 同一运行时进程内，本插件每一次存活的 `apply()` 共享的注册簿记。
  *
- * Why this exists: the host re-runs `apply()` on reload paths (a forced entry
- * update re-applies the plugin on its fiber), and each invocation used to mint
- * a FRESH `owned` map inside its own closure. Two applies then raced through
- * their two `void scan()`s — each saw the other's registrations as an unknown
- * occupier, tried to register the same ids, and the loser reported 「存在同名
- * Id」 on a fresh first install, fixed only by a restart (which applies once).
- * Keying the state on the global registry makes even two module evaluations of
- * this file cooperate: whoever registered an id first is visible to every
- * later scan as `owned`, and the scan mutex below removes the read/register
- * interleaving window entirely.
+ * 它存在的原因：host 会在重载路径上重新运行 `apply()`（强制更新入口会在
+ * 自己的 fiber 上重新 apply 插件），而过去的每次调用都会在自己的闭包里新铸
+ * 一份 `owned` map。两次 apply 于是各自跑各自的 `void scan()` 并互相竞争——
+ * 每方都把对方的注册看成未知占用者，试图注册同样的 id，输的一方在全新
+ * 首次安装时就报「存在同名
+ * Id」，只能靠重启（只 apply 一次）解决。把状态
+ * 键在全局注册表上，即使本文件被求值两次也能协作：先注册某 id 的一方对
+ * 之后每次扫描都可见为 `owned`，而下面的扫描互斥彻底消灭了读/注册交错的
+ * 窗口。
  *
- * The `dispose` closures stored here may belong to another (alive or dying)
- * instance's fiber — calling them is still correct: the registry's unregister
- * is context-independent, and a double call is guarded idempotent on the
- * registry side.
+ * 存在这里的 `dispose` 闭包可能属于另一个（存活或垂死的）实例的 fiber——
+ * 调用它们仍然是正确的：注册表的注销与上下文无关，重复调用在注册表一侧
+ * 也有幂等保护。
  */
 const REG_STATE_KEY = Symbol.for("dsh-waifu-agents/registration-state");
 const REG_STATE = (globalThis[REG_STATE_KEY] ??= {
-  /** preset id -> { dispose, rev }: who registered it, and as what text. */
+  /** preset id -> { dispose, rev }: 谁注册的它，注册成了什么文本。 */
   owned: new Map(),
-  /** id -> hold count: registrations currently mid-flight, ours by definition. */
+  /** id -> 持有计数：当前正在进行中的注册，按定义是我们的。 */
   registering: new Map(),
-  /** Serialization chain: scans run one at a time, across every instance. */
+  /** 串行化链：扫描一次只跑一个，跨所有实例。 */
   scans: Promise.resolve(),
   /**
-   * Team preset id -> { dispose, name, description, applied }: same job as
-   * `owned`, for the half of this plugin's presets that is not a persona file.
+   * 团队预设 id -> { dispose, name, description, applied }：与 `owned` 同职，
+   * 面向本插件预设中不是人设文件的那一半。
    *
-   * `applied` is the token of the apply() that wrote the row. It is the only
-   * way to tell 「this registration is MINE」 from 「a twin instance registered
-   * it」 once the bookkeeping is shared — `dispose` cannot do it, because the
-   * caller holding the map is not necessarily the caller that registered.
+   * `applied` 是写入该行的那个 apply() 的令牌。簿记共享之后，这是区分
+   * 「这条注册是我的」与「孪生实例注册的它」的唯一办法——`dispose` 做不到，
+   * 因为持有 map 的调用者未必是注册它的调用者。
    */
   teamOwned: new Map(),
   /**
-   * Team preset id -> team name. The registry's team half: a running session's
-   * own preset id is the only thing `anchorOf` can read, so without this map
-   * there is no way to know a session was born on a team.
+   * 团队预设 id -> 团队名。注册表的团队半边：运行中的会话自身的预设 id 是
+   * `anchorOf` 唯一读得到的东西，所以没有这张 map 就无从知道某个会话出生
+   * 在团队上。
    *
-   * The value is a plain string, so sharing it across instances is safe — it
-   * carries no handle and no lifetime.
+   * 值是纯字符串，跨实例共享是安全的——它不带句柄、不带生命周期。
    */
   teamPresets: new Map(),
-  /** Serialization chain for team syncs, across every instance. */
+  /** 团队同步的串行化链，跨所有实例。 */
   teamSyncs: Promise.resolve(),
   /**
-   * Apply counter: which instance was born when, in THIS process.
+   * Apply 计数器：本进程里哪个实例生于何时。
    *
-   * Incremented once per `apply()`, never per scan — a scan is a repeat of the
-   * same owner asking again, and letting it bump the counter would make the
-   * quietest instance look newest. Its only job is the takeover rule in
-   * `scanOnce`: a row written by a later instance is never touched by an
-   * earlier one, which is what stops two live instances from trading an id
-   * back and forth on every refresh.
+   * 每次 `apply()` 加一，扫描从不加——扫描是同一个所有者再次发问，若让它
+   * 推高计数，最安静的实例反而会显得最新。它唯一的职责是 `scanOnce` 里的
+   * 接管规则：更晚实例写的行绝不被更早实例触碰，这正是阻止两个存活实例
+   * 在每次刷新时把一个 id 来回易手的东西。
    */
   epoch: 0,
 });
 
 /*
- * A REG_STATE from an older build is already on `globalThis` when the plugin is
- * replaced in-process (the host re-applies without a restart). That object has
- * no team half, and `??=` at the literal above cannot fill it in — it only
- * fires when the KEY is missing. Without these three lines the first team
- * sync after an in-place upgrade would write to `undefined`.
+ * 插件被进程内替换时（host 不重启就重新 apply），旧构建留下的 REG_STATE 已经
+ * 在 `globalThis` 上了。那个对象没有团队半边，而上面字面量处的 `??=` 填不了
+ * 它——只有 KEY 缺失时它才生效。没有这三行，原地升级后的第一次团队同步就会
+ * 写到 `undefined`。
  */
 REG_STATE.teamOwned ??= new Map();
 REG_STATE.teamPresets ??= new Map();
 REG_STATE.teamSyncs ??= Promise.resolve();
 /*
- * Instance ordering, same object-literal caveat: a build from before this field
- * left a REG_STATE without `epoch`, and the literal's default is not written to
- * an object that already exists. Starting it at 0 means the next `apply()` is
- * instance 1 — an upgraded build is always NEWER than the code that wrote the
- * rows already on the book, which is exactly the direction a takeover needs.
+ * 实例序号，同样有对象字面量的告诫：这个字段出现之前的构建留下的 REG_STATE
+ * 没有 `epoch`，而字面量的默认值不会写进已存在的对象。从 0 起步意味着下一
+ * 个 `apply()` 是实例 1——升级后的构建永远比账上已写行的代码 NEWER，这正是
+ * 接管所需要的方向。
  */
 REG_STATE.epoch ??= 0;
 
 /**
- * `SKIP` is a list of file names, and Windows compares file names
- * case-insensitively, so `readme.md` is the same file as `README.md`.
+ * `SKIP` 是一组文件名，而 Windows 比较文件名不区分大小写，所以
+ * `readme.md` 与 `README.md` 是同一个文件。
  */
 const RESERVED = new Set([...SKIP].map((entry) => entry.toLowerCase()));
 
 /**
- * Would this id land on a name the scanner deliberately ignores? Such a file
- * would be written and then never registered, so it is refused up front.
+ * 这个 id 会不会落在扫描器刻意忽略的名字上？这样的文件会被写出来却永远
+ * 得不到注册，所以提前拒绝。
  * @param {string} id
  */
 function reserved(id) {
@@ -505,24 +382,20 @@ function reserved(id) {
 const FRONT_MATTER = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/;
 
 /**
- * Copy this package's shipped `personas/` into `target`, so a first run leaves
- * the user with a writable copy instead of a live directory inside
- * `node_modules` — which the next plugin upgrade would overwrite.
+ * 把本包自带的 `personas/` 复制进 `target`，让首次运行留给用户一份可写的
+ * 副本，而不是 `node_modules` 里的活目录——那会被下一次插件升级覆盖。
  *
- * Staging and then renaming is not decoration. `resolveDir` reads "the
- * directory exists" as "the user's data lives here", so a directory that
- * appeared but was only half filled would be adopted on the next launch and
- * whatever failed to copy would be missing from the roster for good. The staged
- * name ends in neither `.md` nor `personas`, so no scan can ever adopt it;
- * `rename` then fails instead of merging if something created the target
- * meanwhile, and the caller falls back to the packaged directory.
+ * 先暂存再改名不是装饰。`resolveDir` 把"目录存在"读作"用户数据住在这里"，
+ * 一个出现了却只装了一半的目录会在下次启动时被收编，没复制成功的东西从此
+ * 从花名册里消失。暂存名既不以 `.md` 结尾也不叫 `personas`，任何扫描都不可能
+ * 收编它；若其间有谁建了目标，`rename` 会失败而不是合并，调用方则退回包内
+ * 目录。
  *
- * Never overwrites, never throws: a machine where this cannot work must still
- * end up with the shipped wives.
+ * 永不覆盖、永不抛错：在这件事行不通的机器上，也必须以随包 wives 收场。
  *
- * @param {string} target absolute directory to create
- * @param {string} from this package's own `personas/`
- * @returns {boolean} true only when the whole directory landed
+ * @param {string} target 要创建的绝对目录
+ * @param {string} from 本包自带的 `personas/`
+ * @returns {boolean} 仅当整个目录都落地时为 true
  */
 function seedInto(target, from) {
   let entries;
@@ -548,39 +421,37 @@ function seedInto(target, from) {
     try {
       fs.rmSync(stage, { recursive: true, force: true });
     } catch {
-      /* a stray stage directory beats failing to start */
+      /* 留下一个零散的暂存目录好过启动失败 */
     }
     return false;
   }
 }
 
 /**
- * Decide which directory to serve, with no configuration required.
+ * 决定服务哪个目录，不需要任何配置。
  *
- * 1. `config.dir` when the row sets it.
- * 2. `<home>/personas` when that directory exists.
- * 3. that same path, *created* from this package's own `personas/` when `seed`
- *    is set, so a machine that has never seen this plugin ends up with writable
- *    wives rather than ones inside `node_modules`.
- * 4. this package's own `personas/`.
+ * 1. 行设置了 `config.dir` 时用它。
+ * 2. `<home>/personas` 存在时用它。
+ * 3. 同一条路径，当设置了 `seed` 时 *由本包自带的 `personas/` 创建*，让从没
+ *    见过本插件的机器最终得到可写的 wives，而不是 `node_modules` 里的那份。
+ * 4. 本包自带的 `personas/`。
  *
- * `<home>` is `DSH_PROFILE_DIR`'s grandparent, else `DSH_HOME`, else the system
- * home plus `.dsh` — `homeFromEnv` always answers one of the three.
+ * `<home>` 是 `DSH_PROFILE_DIR` 的祖父目录，否则 `DSH_HOME`，否则系统主目录
+ * 加 `.dsh`——`homeFromEnv` 总是给出三者之一。
  *
- * Only step 3 writes, and it never touches a directory that already exists.
+ * 只有第 3 步会写，而且绝不碰已经存在的目录。
  *
  * @param {{ dir?: string, packageDir?: string, env?: Record<string, string | undefined>, seed?: boolean }} [options]
  * @returns {{ dir: string, source: 'config' | 'DSH_PROFILE_DIR' | 'DSH_HOME' | 'default' | 'seeded' | 'package' }}
  */
 /**
- * The DSH home directory, from whichever source this process can see:
- * `DSH_PROFILE_DIR` is `<home>/profiles/<name>`, `DSH_HOME` is the home itself,
- * and the system home plus `.dsh` is the last resort.
+ * DSH 主目录，来自本进程能看到的任何来源：
+ * `DSH_PROFILE_DIR` 是 `<home>/profiles/<name>`，`DSH_HOME` 是主目录本身，
+ * 系统主目录加 `.dsh` 是最后手段。
  *
- * The two variables are Harness *shell* facts — injected into shell executions,
- * not necessarily into the Host process a plugin runs in. Answering `null` here
- * is what used to send every such machine to the packaged, read-only directory,
- * so this always answers with a path.
+ * 这两个变量是 Harness 的 *shell* 层面事实——注入到 shell 执行中，不一定
+ * 注入到插件所在的 Host 进程。过去在这里答 `null`，正是把每台这样的机器
+ * 送去打包只读目录的原因，所以这里总是给出一条路径。
  * @param {Record<string, string | undefined>} env
  * @returns {{ home: string, source: 'DSH_PROFILE_DIR' | 'DSH_HOME' | 'default' }}
  */
@@ -617,18 +488,10 @@ export function resolveDir(options = {}) {
   return { dir: path.join(packageDir, "personas"), source: "package" };
 }
 
-/** Collapse a value onto one line so it survives the flat front-matter format. */
-function oneLine(value) {
-  return String(value ?? "")
-    .replace(/\s*\r?\n\s*/g, " ")
-    .trim();
-}
-
 /**
- * Flat `key: value` front matter — the same subset the existing persona files use.
- * Only the block at the very start of the file is metadata; anything later is
- * answer style, `---` and colons included.
- * @param {string} input - file text
+ * 扁平的 `key: value` front matter——与现存人设文件使用的同一子集。
+ * 只有文件最开头的块是元数据；再靠后的都是回答风格，`---` 和冒号也算。
+ * @param {string} input - 文件文本
  * @returns {{ meta: Record<string, string | number>, body: string }}
  */
 export function parseFrontMatter(input) {
@@ -657,11 +520,11 @@ export function parseFrontMatter(input) {
 }
 
 /**
- * Write metadata plus body back in the format `parseFrontMatter` reads.
+ * 按 `parseFrontMatter` 能读的格式把元数据加正文写回去。
  *
- * `group` and `template` are carried like the others rather than dropped: a
- * panel save rewrites the whole front matter, so any field this function does
- * not know about is a field the panel would silently delete on the next edit.
+ * `group` 与 `template` 像其他字段一样被携带而不是丢弃：面板保存会重写整份
+ * front matter，这个函数不认识的任何字段，都会成为面板下次编辑时悄悄删掉
+ * 的字段。
  */
 export function renderPersona({
   name: displayName,
@@ -681,14 +544,14 @@ export function renderPersona({
   return lines.join("\n");
 }
 
-/** Accept numbers, numeric strings and empty values; return a finite number or undefined. */
+/** 接受数字、数字字符串和空值；返回有限数字或 undefined。 */
 function normalizeOrder(value) {
   if (value === undefined || value === null || value === "") return undefined;
   const n = Number(value);
   return Number.isFinite(n) ? n : undefined;
 }
 
-/** A short, stable token for one file's exact text. */
+/** 一个文件原样文本的简短稳定令牌。 */
 export function revision(text) {
   return createHash("sha256")
     .update(String(text ?? ""), "utf8")
@@ -697,16 +560,15 @@ export function revision(text) {
 }
 
 /**
- * Pour one persona into the shared skeleton.
+ * 把一个人设浇注进共享骨架。
  *
- * Returns `{ ok, text, problems, bodyOffset }`. `problems` is never dropped on
- * the floor: a body that cannot be assembled is refused BEFORE it is written,
- * because a file that cannot be registered would sit in the directory and be
- * invisible in the roster — the one failure mode nobody can diagnose.
+ * 返回 `{ ok, text, problems, bodyOffset }`。`problems` 绝不会扔在地上：无法
+ * 拼装的正文在被写入之前就拒绝，因为一个注册不了的文件会躺在目录里、在
+ * 花名册里不可见——这是谁都没法诊断的失败模式。
  *
- * @param {string} name display name, substituted for `[[name]]`
- * @param {string} body the persona text as stored
- * @param {string | null} skeleton skeleton text, or null when she asks for none
+ * @param {string} name 显示名，替换 `[[name]]`
+ * @param {string} body 存储状态的人设文本
+ * @param {string | null} skeleton 骨架文本，或她不要骨架时的 null
  */
 export function assemble(name, body, skeleton) {
   const problems = [];
@@ -751,7 +613,7 @@ export function assemble(name, body, skeleton) {
   return { ok: problems.length === 0, text, problems, bodyOffset };
 }
 
-/** Only one skeleton name is supported; anything else is a typo, not a feature. */
+/** 只支持一个骨架名；别的都是打错字，不是特性。 */
 export function templateProblem(meta) {
   const value = oneLine(meta?.template);
   if (!value) return null;
@@ -760,27 +622,25 @@ export function templateProblem(meta) {
     : `template: ${value} —— 目前只支持 ${SKELETON_FILE}`;
 }
 
-/** The skeleton a persona asks for, or null when she asks for none. */
+/** 人设要求的骨架，或她不要骨架时的 null。 */
 function skeletonFor(meta, skeleton) {
   return oneLine(meta?.template) === SKELETON_FILE ? skeleton : null;
 }
 
 /**
- * The two capability shapes a preset can be registered in.
+ * 预设可注册成的两种能力形态。
  *
- * `chat` is a conversation and nothing else; `tools` is the full list from
- * `template.json`. Team mode is always `chat`, whatever the row says — see
- * `templateRowsFor`.
+ * `chat` 只是一段对话，别无其他；`tools` 是 `template.json` 里的完整列表。
+ * 团队模式永远是 `chat`，不管该行写什么——见 `templateRowsFor`。
  */
 export const MODES = ["chat", "tools"];
 
 /**
- * Coerce a stored or requested mode.
+ * 把存储或请求的模式规整成合法值。
  *
- * Anything unrecognised falls back to `tools`, which is what every install has
- * been running until this switch existed: adding the switch must not silently
- * strip tools from someone who never touched it. A missing `mode.json` is
- * therefore `tools` as well.
+ * 一切认不出的值都退回 `tools`，即这个开关出现之前每份安装一直在跑的形态：
+ * 加开关绝不能悄悄剥夺从没碰过它的人的工具。因此缺失的 `mode.json` 也是
+ * `tools`。
  * @param {unknown} value
  * @returns {"chat" | "tools"}
  */
@@ -789,22 +649,118 @@ export function normalizeMode(value) {
 }
 
 /**
- * The capability rows a pure-chat preset may mount.
+ * 一个会话此刻实际生效的模式：会话级覆盖优先，否则跟随全局。
  *
- * A whitelist, not a blacklist: `template.json` gains a row every time the
- * host ships a new tool, and a blacklist would quietly hand each new tool to a
- * persona that was switched to pure chat. What survives is the minimum a
- * conversation needs — the persona itself, the clock, and compaction once the
- * history gets long. No filesystem, shell, web, subagent, plan, or todo rows.
+ * 这是 `/waifu-mode here` 的全部魔法，也是它和全局开关的分界线。会话级
+ * 覆盖走的是**运行时闸门**（`tool-filter.js`），不是注册期裁剪——所以它
+ * 不改 `registrationRev`、不重新注册任何人设、不影响别的会话。代价是它
+ * 只封工具，不省掉 preset 里那些能力行；收益是它能做到全局开关永远做不到
+ * 的事：同一个 profile 里，这场聊天、那场干活。
  *
- * The group rows are kept whole (`compaction` is a `cordis:group`): splicing
- * its children would produce a shape the host never validated.
+ * 空字符串是「没有覆盖」，`normalizeMode` 又只认 `chat`，所以这里不能直接
+ * 把空串喂进去——那会把「跟随全局」悄悄读成「工具模式」。
+ * @param {{ session?: unknown, global?: unknown }} input
+ * @returns {"chat" | "tools"}
+ */
+export function resolveMode({ session, global }) {
+  const own = oneLine(session);
+  return normalizeMode(own === "" ? global : own);
+}
+
+/**
+ * `/waifu-mode` 的参数怎么读。
+ *
+ * 导出是为了能在没有宿主的自测里把每一种拼法钉死——这条命令会改全局文件，
+ * 猜错一个拼法就是改错所有人的工具集。四个动作：
+ *
+ *   （空）/ status     → 只看，不动
+ *   chat / work        → 改全局（`work` 是 `tools` 的别名，因为面板上写的是
+ *                        「工作模式」，而内部值从第一天起就是 `tools`）
+ *   here chat / work   → 只改这个会话
+ *   here inherit       → 撤掉这个会话的覆盖，重新跟随全局
+ *
+ * 中文别名（聊天 / 工作）照收：用户嘴上说的是面板上的词，没理由让他记两套。
+ * @param {unknown} raw
+ * @returns {{ kind: "show" }
+ *   | { kind: "global" | "session", mode: "chat" | "tools" | null }
+ *   | { kind: "error", text: string }}
+ */
+export function parseModeCommand(raw) {
+  const words = oneLine(String(raw ?? "")).split(/\s+/).filter((w) => w !== "");
+  const word = (i) => oneLine(words[i]).toLowerCase();
+  const modeOf = (w) => {
+    if (w === "chat" || w === "聊天") return "chat";
+    if (w === "work" || w === "tools" || w === "工作") return "tools";
+    return null;
+  };
+  const usage =
+    "用法：/waifu-mode 看现在是什么；/waifu-mode chat | work 改全局；/waifu-mode here chat | work | inherit 只改这个会话。";
+
+  if (words.length === 0) return { kind: "show" };
+  if (words.length === 1) {
+    const only = word(0);
+    if (only === "status" || only === "current") return { kind: "show" };
+    const mode = modeOf(only);
+    if (mode !== null) return { kind: "global", mode };
+    return { kind: "error", text: `不认识的模式：「${words[0]}」。\n${usage}` };
+  }
+  if (words.length === 2 && word(0) === "here") {
+    const only = word(1);
+    if (only === "inherit" || only === "follow" || only === "跟随") {
+      return { kind: "session", mode: null };
+    }
+    const mode = modeOf(only);
+    if (mode !== null) return { kind: "session", mode };
+    return { kind: "error", text: `不认识的模式：「${words[1]}」。\n${usage}` };
+  }
+  return { kind: "error", text: `参数太多，我只认得这几种。\n${usage}` };
+}
+
+/**
+ * 一个会话究竟能不能看到任何工具，以及为什么。
+ *
+ * 导出它是因为它是条规则而非接线细节：`tool-filter.js` 负责会话如何被封
+ * （restrict + guard），这里回答何时封。四种情况都真实存在，其中三种必须
+ * 不封：
+ *
+ *   team            → 封。讨论按定义就是聊天；运行时自建请求、从不发送
+ *                     `tools`，团队会话仍可能带工具的唯一地方就是该会话里的
+ *                     普通回合。现在不会再有了。
+ *                     注意这一档不看 `mode`：团队是形态，不是模式。工作模式
+ *                     下的团队预设同样零工具——否则"团队不带工具"就成了
+ *                     一句随开关变化的话。
+ *   tools mode      → 开。这是开关出现之前每份安装的运行形态；闸门绝不能
+ *                     从没拨过它的人手里夺走能力。
+ *   聊天 + 本插件的会话 → 封。
+ *   聊天 + 别人的会话   → 开。`mode.json` 是整个 profile 生效的，把每个 agent
+ *                     都封掉会剥掉无关会话（bili-duty 定时任务、qq-bridge
+ *                     agent）的工具，读起来像一次故障。
+ *
+ * @param {{ teamMode?: boolean, mode?: unknown, ours?: boolean }} input
+ * @returns {"" | "team" | "chat"} 原因；会话保持开放时为 ""
+ */
+export function shouldSealTools({ teamMode, mode, ours }) {
+  if (teamMode === true) return "team";
+  if (normalizeMode(mode) !== "chat") return "";
+  return ours === true ? "chat" : "";
+}
+
+/**
+ * 纯聊天预设可挂载的能力行。
+ *
+ * 是白名单，不是黑名单：host 每发布一个新工具，`template.json` 就多一行，
+ * 黑名单会悄悄把每个新工具交给已被切到纯聊天的人设。活下来的是一场对话的
+ * 最低需求——人设本身、时钟，以及历史变长后的压缩。没有文件系统、shell、
+ * 网络、子代理、计划或 todo 行。
+ *
+ * 组行整体保留（`compaction` 是个 `cordis:group`）：拆开拼它的子行会造出
+ * host 从未校验过的形状。
  */
 const CHAT_CAPABILITY_IDS = new Set(["persona", "time-context", "compaction"]);
 
 /**
- * Filter a capability list down to the pure-chat set.
- * @param {unknown} rows `template.json`-shaped capability rows
+ * 把能力列表过滤到纯聊天集合。
+ * @param {unknown} rows `template.json` 形态的能力行
  * @returns {unknown[]}
  */
 export function chatRows(rows) {
@@ -817,13 +773,12 @@ export function chatRows(rows) {
 }
 
 /**
- * What one registration actually mounted, so a later scan can tell "already
- * registered" apart from "registered, but her text has changed since".
+ * 一次注册实际挂载了什么，让后续扫描能区分"已注册"与"注册过，但她的文本
+ * 自那以后变了"。
  *
- * The mode is part of the fingerprint: flipping the chat switch changes the
- * mounted capability list without touching a single file, and a rev that
- * ignored the mode would make `scan()` skip every persona and leave the old
- * tool set in place until a restart.
+ * 模式是指纹的一部分：拨动聊天开关会在不碰任何文件的情况下改变挂载的
+ * 能力列表，忽略模式的 rev 会让 `scan()` 跳过每个人设，把旧工具集原样留在
+ * 那里直到重启。
  * @param {{ text: string } | null} skeleton
  * @param {unknown} body
  * @param {unknown} [mode]
@@ -837,14 +792,13 @@ export function registrationRev(skeleton, body, mode = "tools") {
 }
 
 /**
- * Resolve one typed argument to a persona id.
+ * 把一个输入参数解析成人设 id。
  *
- * The rules are deliberately dull: strip one optional `@` and the surrounding
- * whitespace, then exact id, then exact display name, then a UNIQUE prefix.
- * Ambiguity is reported as candidates instead of guessed at — a command must
- * never decide on its own who you are talking to.
- * @param {unknown} query raw argument
- * @param {{ id: string, name?: string }[]} rows the roster
+ * 规则刻意朴素：剥掉一个可选的 `@` 与两侧空白，然后精确 id，然后精确显示
+ * 名，然后是唯一的前缀。歧义作为候选返回而不是瞎猜——命令绝不能自作主张
+ * 决定你在和谁说话。
+ * @param {unknown} query 原始参数
+ * @param {{ id: string, name?: string }[]} rows 花名册
  * @returns {{ ok: true, id: string } | { ok: false, error: string, candidates?: string[] }}
  */
 export function matchPersona(query, rows) {
@@ -877,14 +831,13 @@ export function matchPersona(query, rows) {
 }
 
 /**
- * The ids one session's text is chosen from, most specific first.
+ * 一个会话的文本从哪些 id 里选，按具体程度排序。
  *
- * The mounted persona comes BEFORE the global default on purpose: the session
- * header records the preset the user picked on the new-task page, and letting
- * the default win would turn the platform's own per-session selector into a
- * decoration. `defaultId` is the rung for a mount that no longer exists.
+ * 挂载的人设刻意排在全局默认之前：会话头记录的是用户在新建任务页挑的
+ * 预设，让默认获胜会把平台自己的每会话选择器变成摆设。`defaultId` 是挂载
+ * 已不存在时的那一档。
  * @param {{ overrideId?: unknown, mountedId?: unknown, defaultId?: unknown }} source
- * @returns {string[]} deduplicated, empties dropped
+ * @returns {string[]} 去重，空值剔除
  */
 export function orderPersonaIds(source) {
   const seen = new Set();
@@ -904,34 +857,29 @@ export function orderPersonaIds(source) {
 }
 
 /**
- * Whether a session is supposed to have a persona at all.
+ * 一个会话到底该不该有人设。
  *
- * The platform evaluates **every** registered prompt variable, whether or not
- * the template references it (`@deepseek-ai/dsh-system-prompt:315-316`
- * iterates every provider before rendering a single section). So without this
- * gate, a session created on a plain assistant preset would still read the
- * skeleton, pour a persona, replace its placeholders and record what it
- * "served" on **every step** — building a string nothing will ever render.
+ * 平台会求值 **每一条** 注册的提示词变量，无论模板是否引用它
+ * （`@deepseek-ai/dsh-system-prompt:315-316` 在渲染任何一节之前会遍历每个
+ * provider）。所以没有这道闸门，建立在普通 assistant 预设上的会话也会在
+ * **每一步** 读骨架、浇人设、替换占位符并记录自己"提供了"什么——造出一串
+ * 永远没人渲染的字符串。
  *
- * That is the "a non-persona preset pays nothing" promise made true at the
- * source, instead of holding only because the template happens to lack the
- * placeholder.
+ * 这就是"非人设预设分文不付"这一承诺在源头兑现的样子，而不是仅仅因为模板
+ * 碰巧没有那个占位符才成立。
  *
- * Two ways a session can legitimately ask for a persona: an explicit
- * `/waifu-change` override, or a preset this plugin owns (which `hasRow`
- * reports, and which also covers "a persona file carries this preset's id").
- * The global default is deliberately NOT one of them — it is a fallback
- * *inside* `sessionPersona`, and letting it open the gate here would
- * re-introduce exactly the cost this gate removes.
+ * 会话合法要求人设的两种方式：显式的 `/waifu-change` 覆盖，或者本插件拥有
+ * 的预设（`hasRow` 报告它，也涵盖"某个人设文件带着这个预设的 id"）。全局
+ * 默认刻意不算——它是 `sessionPersona` *内部* 的后备，若让它在这里打开闸门，
+ * 恰好会重新引入这道闸门要消除的成本。
  *
- * An empty anchor stays open: a session whose preset was never projected is not
- * the same thing as "explicitly a plain preset", and the default rung still has
- * to work for it.
+ * 空锚定保持开放：预设从未被投影的会话不等于"明确是普通预设"，默认那一档
+ * 对它仍然必须生效。
  *
  * @param {object} [source]
- * @param {string|null} [source.overrideId] this session's `/waifu-change` pick
- * @param {string} [source.mountedId] the preset the session was created with
- * @param {boolean} [source.hasRow] whether that preset carries a persona row
+ * @param {string|null} [source.overrideId] 本会话的 `/waifu-change` 选择
+ * @param {string} [source.mountedId] 会话创建时的预设
+ * @param {boolean} [source.hasRow] 该预设是否带有人设行
  * @returns {boolean}
  */
 export function personaExpected({ overrideId, mountedId, hasRow } = {}) {
@@ -942,36 +890,140 @@ export function personaExpected({ overrideId, mountedId, hasRow } = {}) {
 }
 
 /**
- * Who holds this id, as far as the last scan could prove — one word, one truth
- * table, shared by the Host, the panel and the tests.
+ * 一个完成的团队回合 → 每个认识的发言者各得一条。
  *
- * The four answers exist because three of them were previously collapsed into a
- * single alarming sentence:
+ * 纯函数并导出，让测试驱动写入路径用的同一个函数。之前的位置（`apply`
+ * 内部）正是审计套件最后重新实现这条规则、然后测量自己那份拷贝的原因。
  *
- *  - `ours`    this instance registered it (or is between the two halves of a
- *              re-registration — `registering` counts as ours, which is what
- *              stops our own churn from looking like a conflict);
- *  - `ghost`   occupied, and the composition fingerprint says the occupier is a
- *              previous instance of THIS plugin. Actionable: restart DSH;
- *  - `foreign` occupied by something we cannot claim. That is a statement about
- *              **ownership**, not about whether the persona works: the id
- *              resolves, so a session can start; what is unproven is that the
- *              text behind it is this file's;
- *  - `unknown` the scan ran and none of the above is true — no registration
- *              landed and no occupier was seen. The old code drew this as
- *              「未注册」 in the same red as a hard failure, which claimed more
- *              than the evidence supported.
+ * `assistant/message` 携带的是渲染后的回复，不是协议：运行时推送
+ * `renderSegment(event)`，而 `renderSegment` 输出剥掉 `〔名字〕` 标记的
+ * `名字：台词`（`team-simulate.js`；`selftest-v3.mjs` 断言"原始标记不可
+ * 见"）。只认标记的拆分器在每份真实团队回复里都找不到发言者，于是团队
+ * 模式从未写过一条记忆——注入侧在读一个永远填不满的池子。两种形式都接受：
+ * 协议文本先被规范化，因此死在渲染器之前的 run 也能拆分。
  *
- * Precedence is deliberate: ours wins over everything (a row cannot be both
- * ours and occupied by someone else), a proven ghost outranks an unproven
- * occupier because it comes with a remedy, and "nothing seen" is the fallback.
- * Pure and exported so the panel's wording and the tests read the same table
- * instead of re-deriving it from flags.
+ * 一个回合里一个人设的台词合并成一条记忆（见 {@link appendSaid}）：说两次
+ * 话的成员是一次事件而不是两次，否则 20 个槽位每五个回合就滚没了。
+ *
+ * 目录里没人认领的名字直接跳过，而不是靠猜来存：把一句台词记到错误角色
+ * 头上是面板无法撤销的那一种错误，因为等发现时，这份记忆已经在其他会话里
+ * 被回忆了。
+ *
+ * @param {string} text 用户看到的回复
+ * @param {ReadonlyArray<{ id: string, name?: string }>} roster 人设目录
+ * @param {{ team?: string, session?: string }} where 要记录的出处
+ * @returns {{ id: string, text: string, source: object }[]}
+ */
+export function splitBySpeaker(text, roster, where) {
+  const byName = new Map();
+  for (const row of Array.isArray(roster) ? roster : []) {
+    const name = oneLine(row?.name);
+    if (name !== "") byName.set(name, row.id);
+  }
+  /* 最长的名字优先：「托尔」必须赢过一个真的叫「托」的人设。 */
+  const names = [...byName.keys()].sort((a, b) => b.length - a.length);
+  const flat = String(text ?? "")
+    .replace(/〔\/([^〕]{1,40})〕/g, "\n")
+    .replace(/〔([^〕]{1,40})〕/g, "\n$1：");
+  const said = new Map();
+  let open = "";
+  for (const rawLine of flat.split(/\n+/)) {
+    const line = rawLine.trim();
+    if (line === "") continue;
+    const speaker = names.find(
+      (one) => line.startsWith(`${one}：`) || line.startsWith(`${one}:`),
+    );
+    if (speaker !== undefined) {
+      open = byName.get(speaker) ?? "";
+      appendSaid(said, open, line.slice(speaker.length + 1).trim());
+      continue;
+    }
+    /*
+     * 有人说话，但目录里没有人叫这个名字——是中途被移出团队的成员，或一个
+     * `〔旁白〕` 标记。关闭当前发言者并丢掉这一行：把台词继承给最后发言的
+     * 人，是面板无法撤销的那一种错误，而这正是朴素的"先规范化再追加"在此处
+     * 会做的事。
+     */
+    if (/^[^\s：:]{1,40}[：:]/.test(line)) {
+      open = "";
+      continue;
+    }
+    /*
+     * 没人开头的一行是叙述，不是台词。它跟随已在发言的人（续段），没有人的
+     * 时候就丢掉——另一条路是凭空捏造一个所有者。
+     */
+    if (open !== "") appendSaid(said, open, line);
+  }
+  const out = [];
+  for (const [id, body] of said) {
+    if (body === "") continue;
+    out.push({
+      id,
+      text: pickSentence(body),
+      source: {
+        kind: "team",
+        team: oneLine(where?.team),
+        session: oneLine(where?.session),
+      },
+    });
+  }
+  return out;
+}
+
+/** 一个回合里一个人设的台词，合并后：一个回合一条记忆，不是五条。 */
+function appendSaid(bucket, id, line) {
+  if (id === "" || line === "") return;
+  const previous = bucket.get(id);
+  bucket.set(id, previous === undefined ? line : `${previous}\n${line}`);
+}
+
+/**
+ * 一个回合里哪句话值得记住。
+ *
+ * 取前 60 个字符这条显而易见的规则，会系统性地留下
+ * "哈哈哈，我才是最厉害的！"，丢掉三行之后的那句承诺。最长句不是语义
+ * 判断，但至少偏向承载事件的那一句，而且零成本。
+ * @param {string} text
+ * @returns {string}
+ */
+export function pickSentence(text) {
+  const body = String(text ?? "");
+  const parts = body
+    .split(/[。！？!?\n]+/)
+    .map((one) => one.trim())
+    .filter((one) => one !== "");
+  if (parts.length === 0) return body.trim();
+  let best = parts[0];
+  for (const part of parts) if (part.length > best.length) best = part;
+  return best;
+}
+
+/**
+ * 这个 id 在谁手里——以上次扫描能证明的为准——一个词、一张真值表，由
+ * Host、面板与测试共用。
+ *
+ * 四种答案的存在，是因为其中三种过去被压成了一句吓人的话：
+ *
+ *  - `ours`    本实例注册的它（或处于重新注册的两半之间——`registering`
+ *              算作 ours，这正是让我们自己的反复不看起来像冲突的原因）；
+ *  - `ghost`   有占用者，且组合指纹表明占用者是本插件的上一个实例。可行动：
+ *              重启 DSH；
+ *  - `foreign` 被我们认领不了的东西占用。这是关于 **所有权** 的陈述，与
+ *              人设能不能用无关：id 能解析，会话能启动；未被证明的是它背后
+ *              的文本是这个文件的；
+ *  - `unknown` 扫描跑过了而上述都不成立——没有注册落地，也没看到占用者。
+ *              旧代码把它画成「未注册」，与硬失败同一种红色，比证据支持的
+ *              说法更多。
+ *
+ * 优先级是刻意的：ours 压倒一切（一行不能既是我们的又被别人占用），已被
+ * 证明的 ghost 高于未被证明的占用者，因为它附带补救办法，"什么都没看到"
+ * 是兜底。纯函数并导出，让面板的措辞与测试读同一张表，而不是各自从标志位
+ * 重新推导。
  *
  * @param {object} [flags]
- * @param {boolean} [flags.owned] registered by this plugin (incl. mid-swap)
- * @param {boolean} [flags.ghost] occupier fingerprinted as a previous instance
- * @param {boolean} [flags.foreign] an occupier was seen that is not ours
+ * @param {boolean} [flags.owned] 由本插件注册（含交换进行中）
+ * @param {boolean} [flags.ghost] 占用者被指纹识别为上一个实例
+ * @param {boolean} [flags.foreign] 看到了不属于我们的占用者
  * @returns {"ours" | "ghost" | "foreign" | "unknown"}
  */
 export function registrationState({ owned, foreign, ghost } = {}) {
@@ -982,24 +1034,20 @@ export function registrationState({ owned, foreign, ghost } = {}) {
 }
 
 /**
- * The composition text behind `readDocument()`, whatever shape the Host hands
- * back.
+ * `readDocument()` 背后的组合文本，无论 Host 交回来的是什么形状。
  *
- * The service resolves with a WRAPPER — `{ agentPreset, content, name?,
- * description? }` (see `readDocument` in `dsh-agent-preset-registry`, whose
- * `content` is the `dump()` of the declared plugin list). The first version of
- * the ghost check assumed a raw string, so `String(object)` collapsed to
- * `"[object Object]"`: the fingerprint could never match, `ghost` was
- * unreachable, and every identified leftover fell through to a warning that
- * blamed an unrelated declaration.
+ * 该服务 resolve 出的是一个包装对象——`{ agentPreset, content, name?,
+ * description? }`（见 `dsh-agent-preset-registry` 的 `readDocument`，其
+ * `content` 是声明插件列表的 `dump()`）。ghost 检查的第一版假定原始字符串，
+ * 于是 `String(object)` 塌缩成 `"[object Object]"`：指纹永远匹配不上，
+ * `ghost` 不可达，每个被识别出的残留都落进一条怪罪无关声明的警告。
  *
- * A `content` that is already a structure is serialised rather than
- * string-coerced — the check is a substring search, so keys and values have to
- * survive. Any OTHER shape yields "" on purpose: an unreadable document must
- * fail the check, never pass it.
+ * 已经是结构的 `content` 会被序列化而不是字符串强转——这个检查是子串搜索，
+ * 键与值都必须活下来。其他任何形状刻意返回 ""：读不出的文档必须让检查
+ * 失败，绝不能让它通过。
  *
- * @param {unknown} doc whatever `readDocument()` resolved with
- * @returns {string} the composition text, or "" when the shape is not readable
+ * @param {unknown} doc `readDocument()` resolve 出的任何东西
+ * @returns {string} 组合文本；形状不可读时为 ""
  */
 export function documentText(doc) {
   if (typeof doc === "string") return doc;
@@ -1015,12 +1063,12 @@ export function documentText(doc) {
 }
 
 /**
- * Move one id directly in front of another.
+ * 把一个 id 直接移到另一个 id 前面。
  *
- * @param {string[]} ids the current sequence
- * @param {string} movedId the row being dragged
- * @param {string} beforeId the row it was dropped on
- * @returns {string[] | null} the new sequence, or null when the move is a no-op
+ * @param {string[]} ids 当前序列
+ * @param {string} movedId 被拖动的那一行
+ * @param {string} beforeId 它被放到其前面的那一行
+ * @returns {string[] | null} 新序列；移动是空操作时为 null
  */
 export function reorderIds(ids, movedId, beforeId) {
   const from = ids.indexOf(movedId);
@@ -1033,23 +1081,21 @@ export function reorderIds(ids, movedId, beforeId) {
 }
 
 /**
- * One preset definition: identity from the front matter, capabilities from the
- * template with only the persona row's `prefix` replaced.
+ * 一份预设定义：身份来自 front matter，能力来自模板，只替换人设行的
+ * `prefix`。
  *
- * The prefix is the PLACEHOLDER, not the text: the row is mounted once and its
- * text is read on every assembly, which is the only way a session can change
- * persona after its first turn. `assemble()` still runs at registration time so
- * an unusable body is refused here rather than at render time.
+ * 前缀是占位符，不是文本：该行只挂载一次，其文本在每次组装时读取，这是
+ * 会话在首个回合之后还能换人设的唯一途径。`assemble()` 仍在注册时运行，
+ * 让不可用的正文在这里被拒绝，而不是拖到渲染时。
  *
- * The `order` that leaves here is the LOCAL order shifted into this plugin's own
- * band — see {@link PERSONA_ORDER_BASE}. A wife with no `order:` of her own keeps
- * being unranked (`undefined`), which sorts last in the registry and after every
- * ranked row, exactly as before.
- * @param {string} id - preset id (file name without `.md`)
- * @param {Record<string, unknown>} meta - parsed front matter
- * @param {string} body - the persona text, as stored
- * @param {unknown[]} templateRows - capability list
- * @param {{ text: string } | null} [skeleton] - the shared skeleton, if any
+ * 这里出去的 `order` 是移进本插件自己区段的局部 order——见
+ * {@link PERSONA_ORDER_BASE}。没有自己 `order:` 的 wife 保持无排名
+ * （`undefined`），在注册表中排最后、排在每条有排名的行之后，与从前一致。
+ * @param {string} id - 预设 id（去掉 `.md` 的文件名）
+ * @param {Record<string, unknown>} meta - 解析出的 front matter
+ * @param {string} body - 存储状态的人设文本
+ * @param {unknown[]} templateRows - 能力列表
+ * @param {{ text: string } | null} [skeleton] - 共享骨架（若有）
  */
 export function buildDefinition(id, meta, body, templateRows, skeleton = null, orderBase = PERSONA_ORDER_BASE) {
   const name = oneLine(meta.name) || id;
@@ -1060,8 +1106,8 @@ export function buildDefinition(id, meta, body, templateRows, skeleton = null, o
     name,
     description: oneLine(meta.description) || undefined,
     order: localOrder === undefined ? undefined : orderBase + localOrder,
-    // `poured` is still computed: a body the renderer would reject must be
-    // refused while the panel is saving it, not after a session has mounted it.
+    // `poured` 仍然要算：渲染器会拒绝的正文必须在面板保存它时就被拒绝，
+    // 而不是等会话挂载它之后。
     plugins: templateRows.map((row) =>
       row && row.name === "@deepseek-ai/dsh-persona"
         ? {
@@ -1082,8 +1128,41 @@ export function apply(ctx, config = {}) {
   const dir = resolved.dir;
   const dirSource = resolved.source;
 
-  /** The packaged directory is replaced wholesale by the next upgrade, so it is read-only. */
+  /** 打包目录会被下一次升级整体替换，所以它是只读的。 */
   const writable = dirSource !== "package";
+
+  /**
+   * 插件资产随版本走：只要这个目录是我们播种的，就把骨架和说明刷成包里这一版。
+   *
+   * 与「播种只做一次」的旧行为相反。骨架本身就是提示词的一部分——包里规则改
+   * 了而用户目录停在上一版，同一份插件就会在不同机器上跑出两套行为，报上来的
+   * 问题也就无从复现。人设 `*.md`、`persona-memory/`、`teams.json`、`mode.json`
+   * 都不在刷新名单里，一个字节都不会被碰到（见 `seed-assets.js`）。
+   *
+   * 写失败不拦启动：一个只读或权限不全的目录不该让整块插件不加载，所以只记一
+   * 条警告，扫描照常。
+   */
+  if (writable) {
+    const refreshed = refreshAssets({
+      dir,
+      packageDir: PACKAGE_DIR,
+      version: RUNNING_VERSION ?? "",
+    });
+    if (refreshed.ok !== true) {
+      ctx.logger?.warn?.(
+        `dsh-waifu-agents: 插件资产没能刷到当前版本：${refreshed.error ?? "未知原因"}`,
+      );
+    } else if (refreshed.written.length > 0) {
+      const backup =
+        refreshed.backedUp.length > 0
+          ? `（原文件另存为 ${refreshed.backedUp.join("、")}）`
+          : "";
+      ctx.logger?.info?.(
+        `dsh-waifu-agents: 已把 ${refreshed.written.join("、")} 更新到 ${RUNNING_VERSION ?? "当前版本"}${backup}`,
+      );
+    }
+  }
+
   function readOnly() {
     return {
       ok: false,
@@ -1095,23 +1174,36 @@ export function apply(ctx, config = {}) {
   );
 
   /**
-   * Team mode's runtime, installed further down once its dependencies exist.
+   * 团队模式的运行时，等依赖就绪后在更下面安装。
    *
-   * A `let` rather than a `const` because the pieces it needs — the roster
-   * reader, the persona resolver, the live-agent lookup — are defined later in
-   * this same function, and every one of them is only reachable after `apply`
-   * has returned. `null` is the honest initial value: it means "not installed
-   * yet", and both call sites treat it as "team mode contributes nothing".
+   * 用 `let` 而非 `const`，因为它需要的几块——花名册读取器、人设解析器、
+   * 活跃 agent 查找——定义在同一个函数的更后面，且每块都要等 `apply` 返回
+   * 之后才可达。`null` 是诚实的初值：意思是"还没装上"，两处调用点都把它当
+   * "团队模式不贡献任何东西"处理。
    */
   let teamRuntime = null;
 
   /**
-   * Patch ids this row may be known by, for the configEditor lookup.
+   * 运行时工具闸门——让"聊天/团队会话一个工具都没有"成真而不止是意愿的
+   * 那个东西。
    *
-   * The `persona-waifu` pair is the pre-rename spelling of the same row: a
-   * profile created before the package became `dsh-waifu-agents` still carries
-   * that id, and the directory / default-persona settings live on it. Matching
-   * both spellings keeps those settings reachable across the rename.
+   * `chatRows()` 决定预设挂载哪些能力行，而那是只能在注册时、只对它自己
+   * 的行做的决定：profile 层已经在全局层放了三十多个工具，预设只能追加、
+   * 永远不能移除。所以能力列表是粗的那一半，真正兜住的是这一半——在
+   * agent 自己的作用域上 `ctx.tools.restrict({ allow: [] })`，外加背后的
+   * 一道执行守卫。见 `tool-filter.js`。
+   *
+   * `apply()` 还在接线时为 `null`：这个决定需要花名册、覆盖存储和影子表，
+   * 全都定义在更下面。
+   */
+  let toolFilter = null;
+
+  /**
+   * configEditor 查找时这一行可能被叫到的 patch id。
+   *
+   * `persona-waifu` 这对是同一行改名前的拼写：在包变成 `dsh-waifu-agents`
+   * 之前创建的 profile 仍带着那个 id，目录 / 默认人设设置就住在它上面。
+   * 两种拼写都匹配，这些设置才能跨改名继续可用。
    */
   const SELF_IDS = [
     "waifu-agents",
@@ -1121,104 +1213,88 @@ export function apply(ctx, config = {}) {
   ];
 
   /**
-   * preset id -> { dispose, rev, applied, epoch }: the disposer, what was
-   * registered, and who registered it.
+   * preset id -> { dispose, rev, applied, epoch }：注销器、注册了什么、谁
+   * 注册的它。
    *
-   * SHARED across every live apply() of this plugin (`REG_STATE` at the top of
-   * the module) — a per-invocation map is how two applies of the same plugin
-   * ended up racing each other on a fresh install, each reading the other's
-   * registrations as an unknown occupier. Sharing one map means the rows are
-   * visible to every instance, so a scan never reads a twin's work as a
-   * stranger's.
+   * 在本插件每一次存活的 apply() 之间共享（模块顶部的 `REG_STATE`）——每次
+   * 调用各用一张 map，正是同一插件两次 apply 在全新安装上互相竞争、彼此把
+   * 对方注册看成未知占用者的原因。共享一张 map 意味着这些行对每个实例都
+   * 可见，扫描就不会把孪生的工作读成陌生人的。
    *
-   * Visible is not the same as transferable: a later apply does NOT adopt an
-   * earlier one's row, it TAKES IT OVER — dispose the old registration, install
-   * its own (`scanOnce`, ordered by `instEpoch`). Adoption was the R5 bug: the
-   * adopting instance held a row whose disposer closed over the OTHER
-   * instance's fiber, so when that fiber died the registrations went with it
-   * and the survivor cheerfully skipped the ids it no longer owned.
+   * 可见不等于可继承：更晚的 apply 不会收养更早实例的行，而是接管它——
+   * 注销旧注册，装上自己的（`scanOnce`，按 `instEpoch` 排序）。收养曾是
+   * R5 的 bug：收养的实例持有这样一行，其注销器闭包在另一个实例的 fiber
+   * 上，那个 fiber 一死注册跟着走，幸存者高高兴兴跳过它已不再拥有的 id。
    */
   const owned = REG_STATE.owned;
 
   /**
-   * Which apply() wrote a ledger row, and when it was born.
+   * 哪个 apply() 写了账本行，它生于何时。
    *
-   * The row says 「this id is registered and here is how to take it down」. It
-   * does NOT say 「that disposer will still be callable later」: the function
-   * closes over the registering instance's fiber, and the fiber dies with it.
-   * When two applies share the book, the later one used to adopt the earlier
-   * one's rows as its own — same id, same text — and then inherit a disposer
-   * that dies first.
+   * 这行只说「这个 id 已注册，这是拆掉它的办法」。它不说「那个注销器之后
+   * 仍然可调用」：函数闭包在注册实例的 fiber 上，fiber 一死它也死。两个
+   * apply 共用账本时，更晚的那个过去会把更早的行当成自己的收下——同 id、
+   * 同文本——然后继承一个先死的注销器。
    *
-   *   `instToken` answers 「did *I* write this row」.
-   *   `instEpoch` answers 「was the writer born before or after me」.
+   *   `instToken` 回答「这行是不是 *我* 写的」。
+   *   `instEpoch` 回答「写它的人生在我之前还是之后」。
    *
-   * Both are needed. Identity alone is not a takeover rule: two instances that
-   * are BOTH alive would each see a foreign token and each take the row, every
-   * scan, forever — a ping-pong in which the disposer changes hands on every
-   * refresh. Ordering alone is not a rule either: without the token, an
-   * instance cannot tell its own stale row (text changed → rebuild) from a
-   * newer instance's row (leave it alone). Together they give one direction of
-   * travel: only rows from an EARLIER instance may be taken, so the instance
-   * that applied last owns the id and, since it also outlives the others in
-   * the ordinary reload shape, owns the disposer too.
+   * 两个都要。只有身份不构成接管规则：两个都存活的实例会各自看到异己令牌、
+   * 各自拿走这一行，每次扫描都如此，永远——一场每次刷新都让注销器换手的
+   * 乒乓。只有排序也不构成规则：没有令牌，实例分不清自己的过期行（文本变了
+   * →重建）和更新实例的行（别碰）。合在一起给出一趟单向旅程：只有更早实例
+   * 的行可以拿走，于是最后 apply 的实例拥有这个 id，而由于在普通重载形态里
+   * 它也活得最久，注销器也归它。
    *
-   * Allocated HERE, once per `apply()` — never in `scanOnce`. A scan is the
-   * same instance asking again; if it advanced the counter, two live instances
-   * alternating refreshes would take turns looking newest and the ping-pong
-   * would come back through the front door.
+   * 在这里分配，每次 `apply()` 一次——绝不在 `scanOnce`。扫描是同一个实例
+   * 再次发问；若让它推高计数，两个存活实例交替刷新就会轮流显得最新，乒乓
+   * 又会从正门回来。
    */
   const instToken = {};
   const instEpoch = (REG_STATE.epoch = (REG_STATE.epoch ?? 0) + 1);
 
   /**
-   * Ids that are OURS but momentarily unregistered.
+   * 属于我们但此刻暂时未注册的 id。
    *
-   * Re-registering takes two halves — `unregister` disposes the old preset, then
-   * `register` installs the new text — and both of them await. A roster read
-   * landing in that gap sees `owned.has(id) === false` for a wife this plugin
-   * still owns, which the panel drew as 「未注册 · 这个 id 被别的所有者占用了」.
-   * That sentence was a false accusation produced by our own bookkeeping, and it
-   * is exactly what a user sees after editing a row and then clicking that same
-   * row's default switch: the blur autosave is mid-swap while the switch's
-   * reload asks for the roster.
+   * 重新注册分两半——`unregister` 注销旧预设，然后 `register` 装上新文本
+   * ——两者都要 await。落进这个空档的花名册读取，会为一个本插件仍然拥有的
+   * wife 看到 `owned.has(id) === false`，面板把它画成
+   * 「未注册 · 这个 id 被别的所有者占用了」。那句话是我们自己的簿记造出的
+   * 诬告，而用户编辑一行然后点同一行的默认开关之后看到的正是它：失焦自动
+   * 保存正在换手中，开关的重载却在要花名册。
    *
-   * Counted rather than a Set: `update` and `scan` can overlap on one id, and the
-   * first to finish must not release the other one's hold. Shared via
-   * `REG_STATE` like `owned`, for the same reason: a twin apply mid-swap must
-   * be visible here, or the other instance's scan reads the gap as a conflict.
+   * 用计数而不用 Set：`update` 与 `scan` 可能在同一个 id 上交叠，先完成的一
+   * 方不能放掉另一方还握着的持有。与 `owned` 一样经由 `REG_STATE` 共享，理由
+   * 相同：换手中的孪生 apply 必须在这里可见，否则另一个实例的扫描会把空档
+   * 读成冲突。
    */
   const registering = REG_STATE.registering;
 
   /**
-   * Ids another owner really holds, as of the last scan.
+   * 截至上一次扫描，确实被其他所有者握着的 id。
    *
-   * This is the only evidence that 「这个 id 被别的所有者占用了」 is true, which is
-   * why the panel reads it before saying it. Without it the row could only guess
-   * — and the guess was wrong exactly when it mattered.
+   * 这是「这个 id 被别的所有者占用了」为真的唯一证据，面板开口之前先读它。
+   * 没有它，这一行只能猜——而猜错恰恰错在要紧的时刻。
    */
   const foreign = new Set();
 
   /**
-   * Ids a previous instance of THIS plugin still holds (hot-reload ghosts).
+   * 本插件的上一个实例仍然握着的 id（热重载幽灵）。
    *
-   * `foreign` means "occupied, occupier unknown"; `ghosts` narrows it to
-   * "occupied, and the occupier is provably us" — the panel words those two
-   * differently, because the remedy differs: a stranger means rename the
-   * file, a ghost means restart DSH (the stale registration lives inside the
-   * previous instance and there is no API to reach it).
+   * `foreign` 意思是"被占用，占用者不明"；`ghosts` 把它收窄成"被占用，且
+   * 占用者可证明就是我们"——面板对这两者的措辞不同，因为补救不同：生人
+   * 意味着改文件名，幽灵意味着重启 DSH（过期注册活在上一个实例内部，没有
+   * API 能碰到它）。
    */
   const ghosts = new Set();
 
   /**
-   * Has one scan finished with a readable roster?
+   * 是否已经有一次扫描带着可读花名册完成？
    *
-   * Until it has, `owned` is empty because nothing has been registered YET — not
-   * because a row failed. The panel reads `owned` to decide whether to draw
-   * 「未注册」, and a read that lands in that startup window would paint every
-   * single row as unregistered: the most alarming possible rendering of "still
-   * booting". Changing the directory restarts this plugin, so that window is
-   * reachable with the panel already open.
+   * 在此之前 `owned` 为空，是因为还没有任何东西注册——不是因为某行失败。
+   * 面板读 `owned` 来决定要不要画「未注册」，落在启动窗口里的读取会把每一
+   * 行都画成未注册："还在启动"最吓人的一种呈现。改目录会重启本插件，所以
+   * 面板开着的时候也可能撞上那个窗口。
    */
   let scannedOnce = false;
 
@@ -1239,14 +1315,12 @@ export function apply(ctx, config = {}) {
   const fileFor = (id) => path.join(dir, `${id}.md`);
 
   /**
-   * One parsed file, keyed by path and validated by `(mtimeMs, size)`.
+   * 一份解析好的文件，以路径为键，用 `(mtimeMs, size)` 校验。
    *
-   * `chars` is the length of the body AFTER the front matter is stripped and
-   * the text trimmed, so it cannot be derived from the byte size (one CJK
-   * character is three bytes) — the cache has to keep the parse, not the bytes.
-   * `size` only decides whether that parse is still valid, which is the same
-   * judgement the harness makes about a client bundle: mtimeMs/ctimeMs/size,
-   * and never a content hash.
+   * `chars` 是剥掉 front matter 并修剪文本之后的正文长度，所以不能从字节
+   * 大小推出来（一个 CJK 字符三个字节）——缓存必须保存解析结果而不是字节。
+   * `size` 只判断那份解析是否仍然有效，这与 harness 对 client bundle 的判断
+   * 相同：mtimeMs/ctimeMs/size，从不做内容哈希。
    */
   const fileCache = new Map();
   let skeletonCache = null;
@@ -1274,7 +1348,7 @@ export function apply(ctx, config = {}) {
     return entry;
   }
 
-  /** The shared skeleton, or null when this directory has none. */
+  /** 共享骨架；这个目录没有时为 null。 */
   function readSkeleton() {
     const full = path.join(dir, SKELETON_FILE);
     if (!fs.existsSync(full)) return null;
@@ -1300,13 +1374,11 @@ export function apply(ctx, config = {}) {
   }
 
   /**
-   * Write one persona file so that what sits on disk is never half of either
-   * version: stage beside the target, then `rename` over it. This repository
-   * already seeds directories that way (`seedInto`) and for the same reason —
-   * `rename` is atomic, a partially written file is not. No `.bak` is kept:
-   * the optimistic lock (readPersona fingerprints the live file before each
-   * save) already refuses to clobber an externally-changed file, and a staged
-   * rename leaves no half-written state to recover from.
+   * 写一个人设文件，让磁盘上的东西永远不是两个版本各自的一半：先暂存在
+   * 目标旁边，再 `rename` 盖上去。本仓库播种目录用的就是这套（`seedInto`），
+   * 理由相同——`rename` 是原子的，写到一半的文件不是。不保留 `.bak`：
+   * 乐观锁（readPersona 在每次保存前对在盘文件取指纹）已经拒绝覆盖被外部
+   * 改过的文件，而暂存改名不会留下任何需要恢复的半写状态。
    */
   function writeAtomic(full, text) {
     const stage = `${full}.stage-${process.pid}-${Date.now()}`;
@@ -1317,7 +1389,7 @@ export function apply(ctx, config = {}) {
       try {
         fs.rmSync(stage, { force: true });
       } catch {
-        // best effort
+        // 尽力而为
       }
       throw error;
     }
@@ -1325,12 +1397,11 @@ export function apply(ctx, config = {}) {
     skeletonCache = null;
   }
 
-  /* ------------------------------------------- session persona override */
+  /* ------------------------------------------- 会话人设覆盖 */
 
   /**
-   * The one path this plugin owns. Inside the persona directory whenever that
-   * directory is writable, so "the plugin left something behind" has exactly one
-   * answer; beside the profile home only in the read-only fallback.
+   * 本插件拥有的唯一路径。人设目录可写时就在该目录内，"插件留下了什么"
+   * 恰好只有一个答案；只有只读后备时才放在 profile 主目录旁边。
    */
   const overrideFile = writable
     ? path.join(dir, OVERRIDE_FILE_IN_DIR)
@@ -1340,18 +1411,27 @@ export function apply(ctx, config = {}) {
     LEGACY_OVERRIDE_FILE,
   );
 
+  /**
+   * 人设长期记忆：每个人设一个 JSON，开关用一个 `_config.json`。放在
+   * `teams.json` 和 `team-memory/` 旁边的理由与团队记忆相同——备份或清理
+   * 不必知道第二个位置。
+   */
+  const personaMemoryDir = path.join(
+    path.dirname(overrideFile),
+    "persona-memory",
+  );
+
   /* ------------------------------------------------------------ chat / tools */
 
-  /** `mode.json` beside the override store — see `MODE_FILE`. */
+  /** `mode.json`，在覆盖存储旁边——见 `MODE_FILE`。 */
   const modeFile = path.join(path.dirname(overrideFile), MODE_FILE);
 
   /**
-   * The mode this process runs in.
+   * 本进程运行所处的模式。
    *
-   * Read once at apply and written only by `setMode`, which also re-registers
-   * every persona: the capability list is baked into a registration, so a
-   * switch that only changed this variable would look applied in the panel and
-   * change nothing in the model until the next restart.
+   * apply 时读取一次，只有 `setMode` 会写它，而后者同时重新注册每个人设：
+   * 能力列表在注册时就烤进去了，只改这个变量的开关会在面板里显得已生效，
+   * 却直到下次重启都不改变模型看到的任何东西。
    */
   let currentMode = readStoredMode();
 
@@ -1360,8 +1440,8 @@ export function apply(ctx, config = {}) {
       const parsed = JSON.parse(fs.readFileSync(modeFile, "utf8"));
       return normalizeMode(parsed?.mode);
     } catch {
-      // No file, or one a half-finished write left unreadable: the pre-switch
-      // behaviour (full tools) is the only safe reading.
+      // 没有文件，或一次写到一半留下的读不出的文件：开关之前的
+      // 行为（完整工具）是唯一安全的解读。
       return "tools";
     }
   }
@@ -1372,12 +1452,11 @@ export function apply(ctx, config = {}) {
   }
 
   /**
-   * The capability rows one preset gets.
+   * 一个预设拿到的能力行。
    *
-   * A team is chat by definition, not by setting: every member answers in one
-   * pass inside a request the runtime builds itself, so handing them a shell
-   * or a filesystem would describe a capability the discussion cannot use.
-   * That is also why the global switch never reaches team presets.
+   * 团队按定义是聊天，不是靠设置：每个成员都在运行时自建的请求里一次作答，
+   * 发给它们 shell 或文件系统，描述的是讨论用不上的能力。这也是全局开关
+   * 永远到不了团队预设的原因。
    * @param {"persona" | "team"} kind
    */
   function templateRowsFor(kind) {
@@ -1385,7 +1464,7 @@ export function apply(ctx, config = {}) {
     return kind === "team" || currentMode === "chat" ? chatRows(rows) : rows;
   }
 
-  /** session id -> { personaId, at }; loaded once, rewritten atomically. */
+  /** session id -> { personaId, at }；加载一次，原子重写。 */
   let overrides = null;
 
   function readOverrides() {
@@ -1402,31 +1481,53 @@ export function apply(ctx, config = {}) {
             rows[sessionId] = {
               personaId,
               at: Number(value?.at) || 0,
-              // The preset this session runs with NO override, captured when the
-              // override was first laid down. Empty on a record written before
-              // this field existed — those fall back to the header.
+              // 本会话在没有任何覆盖时运行的预设，在第一次落下覆盖时捕获。
+              // 此字段存在之前写入的记录里为空——那些退回读取 header。
               resting: oneLine(value?.resting),
             };
         }
       }
     } catch {
-      // A missing or unreadable file means "no overrides" — never a failed boot.
+      // 文件缺失或读不出意味着"没有覆盖"——绝不让启动失败。
     }
     overrides = rows;
     return overrides;
   }
+
+  /**
+   * session id -> `"chat" | "tools"`。空表＝每个会话都跟随全局。
+   *
+   * 单独一张表而不是塞进 `overrides[sid]`：`setOverride(null)` 会连记录一起
+   * `delete`，`/waifu-reset` 走的正是那条路。模式覆盖如果长在同一个对象上，
+   * 一次「回到原来的人设」会顺手把「这个会话只聊天」也撤掉——那是两件事，
+   * 用户没有要求后一件。
+   *
+   * 声明放在 `writeOverrides` 之前：那个函数在首次扫描期间就可能被调到，
+   * `let` 的暂时性死区不会因为调用点在后面就网开一面。
+   */
+  let sessionModes = null;
 
   function writeOverrides() {
     const ordered = Object.entries(readOverrides()).sort(
       (a, b) => (b[1].at ?? 0) - (a[1].at ?? 0),
     );
     overrides = Object.fromEntries(ordered.slice(0, OVERRIDE_LIMIT));
+    /*
+     * `modes` 必须跟着一起写。这个文件是整份重写的，只序列化 `overrides`
+     * 就会把每一条 `/waifu-mode here` 抹掉——而且是静默抹掉：切个人设，
+     * 另一个会话的模式覆盖就没了。两条记录性质不同（一个是"这个会话是谁"，
+     * 一个是"这个会话能不能用工具"），所以分两张表，但共用这一次原子写。
+     */
+    const keptModes = Object.fromEntries(
+      Object.entries(readSessionModes()).slice(0, OVERRIDE_LIMIT),
+    );
+    sessionModes = keptModes;
     try {
       fs.mkdirSync(path.dirname(overrideFile), { recursive: true });
       const stage = `${overrideFile}.stage-${process.pid}`;
       fs.writeFileSync(
         stage,
-        JSON.stringify({ version: 1, overrides }, null, 2),
+        JSON.stringify({ version: 1, overrides, modes: keptModes }, null, 2),
         "utf8",
       );
       fs.renameSync(stage, overrideFile);
@@ -1437,6 +1538,64 @@ export function apply(ctx, config = {}) {
     }
   }
 
+  /**
+   * 单独一张表而不是塞进 `overrides[sid]`：`setOverride(null)` 会连记录一起
+   * `delete`，`/waifu-reset` 走的正是那条路。模式覆盖如果长在同一个对象上，
+   * 一次「回到原来的人设」会顺手把「这个会话只聊天」也撤掉——那是两件事，
+   * 用户没有要求后一件。
+   */
+  function readSessionModes() {
+    if (sessionModes !== null) return sessionModes;
+    const rows = {};
+    try {
+      const parsed = JSON.parse(fs.readFileSync(overrideFile, "utf8"));
+      const stored =
+        parsed !== null && typeof parsed === "object" ? parsed.modes : null;
+      if (stored !== null && typeof stored === "object") {
+        for (const [sessionId, value] of Object.entries(stored)) {
+          const mode = oneLine(value);
+          if (sessionId !== "" && MODES.includes(mode)) rows[sessionId] = mode;
+        }
+      }
+    } catch {
+      // 同 readOverrides：读不出就是「没有覆盖」，绝不让启动失败。
+    }
+    sessionModes = rows;
+    return sessionModes;
+  }
+
+  /** 会话级覆盖；没有时为 `""`（跟随全局）。 */
+  function sessionModeOf(sessionId) {
+    if (typeof sessionId !== "string" || sessionId === "") return "";
+    const hit = readSessionModes()[sessionId];
+    return hit === undefined ? "" : hit;
+  }
+
+  /**
+   * 钉住或撤销一个会话的模式。
+   *
+   * 显式给 `here chat` 时会记下来，即使当时全局也是 `chat`——覆盖的语义是
+   * 「钉住」，不是「和全局不一样才记」。否则用户说完 `here chat` 之后切一下
+   * 全局，这个会话会跟着变，而他刚说过它要聊天。
+   * @param {string} sessionId
+   * @param {"chat" | "tools" | null} mode `null` 表示撤回、重新跟随全局
+   * @returns {boolean} 记录是否已写入
+   */
+  function setSessionMode(sessionId, mode) {
+    if (typeof sessionId !== "string" || sessionId === "") return false;
+    const rows = readSessionModes();
+    if (mode === null) delete rows[sessionId];
+    else rows[sessionId] = normalizeMode(mode);
+    sessionModes = rows;
+    writeOverrides();
+    /*
+     * 立刻对活着的 agent 复查。`reconcileAll` 是幂等的，只在「该封却没封 /
+     * 不该封却封着」时动手，所以这里不需要判断自己刚改的是哪一场。
+     */
+    toolFilter?.reconcileAll?.();
+    return true;
+  }
+
   function overrideOf(sessionId) {
     if (typeof sessionId !== "string" || sessionId === "") return null;
     const hit = readOverrides()[sessionId];
@@ -1444,14 +1603,12 @@ export function apply(ctx, config = {}) {
   }
 
   /**
-   * The preset this session runs with NO override, or `""` when nothing
-   * recorded it.
+   * 本会话在没有任何覆盖时运行的预设，没有记录时为 `""`。
    *
-   * Read by `/waifu-reset`, which is the one caller that has to know where the
-   * session came from. See {@link setOverride} for why it cannot be read off
-   * the session at reset time.
+   * `/waifu-reset` 读它，那是唯一必须知道会话来自哪里的调用者。为什么不能
+   * 在重置时才从会话上读，见 {@link setOverride}。
    * @param {string} sessionId
-   * @returns {string} the recorded id, or `""`
+   * @returns {string} 记录下的 id，或 `""`
    */
   function restingOf(sessionId) {
     if (typeof sessionId !== "string" || sessionId === "") return "";
@@ -1460,22 +1617,20 @@ export function apply(ctx, config = {}) {
   }
 
   /**
-   * Point one session at one persona, or — with `null` — clear it.
+   * 把一个会话指向一个人设；给 `null` 则清除。
    *
-   * `ownPreset` is what the session would run as with no override at all, read
-   * BEFORE this write. It is recorded for the FIRST override only, because that
-   * is the last moment the answer is still the session's own: every later switch
-   * runs after this plugin has already moved the session's chip
-   * ({@link rememberSessionPreset}) onto the previous override, so reading the
-   * chip then would only read back the plugin's own last answer — which is
-   * exactly the "/waifu-reset back to the last switched face" bug this field exists to
-   * kill. A session that was re-picked on the new-task screen makes the point:
-   * its header still names the preset it was BORN with while its chip names the
-   * pick, and `/waifu-reset` owes the pick.
+   * `ownPreset` 是这个会话在完全无覆盖时会以什么身份运行，在本写入之前
+   * 读取。只为第一次覆盖记录它，因为那是答案仍属于会话自己的最后时刻：
+   * 之后的每次切换都发生在本插件已经把会话的 chip（
+   * {@link rememberSessionPreset}）挪到上一个覆盖之后，那时读 chip 只会读回
+   * 插件上一次自己的答案——这正是本字段要消灭的"/waifu-reset 回到上次切到
+   * 的那张脸"bug。在新建任务屏上重新选过的会话最能说明问题：它的 header
+   * 仍写着出生时的预设，chip 却写着重新挑的那个，而 `/waifu-reset` 欠的是
+   * 重新挑的那个。
    * @param {string} sessionId
-   * @param {string | null} personaId the override, or `null` to clear it
-   * @param {string} [ownPreset] the session's own preset, read before this write
-   * @returns {boolean} whether the record was written
+   * @param {string | null} personaId 覆盖；`null` 表示清除
+   * @param {string} [ownPreset] 会话自己的预设，在本写入之前读取
+   * @returns {boolean} 记录是否已写入
    */
   function setOverride(sessionId, personaId, ownPreset) {
     if (typeof sessionId !== "string" || sessionId === "") return false;
@@ -1497,14 +1652,12 @@ export function apply(ctx, config = {}) {
   }
 
   /**
-   * Collect the 0.3.x override file that sat beside the profile home, then
-   * delete it.
+   * 收编旧 0.3.x 时代放在 profile 主目录旁的覆盖文件，然后删掉它。
    *
-   * Reading only the new path would silently drop every per-session choice made
-   * before the upgrade, and leaving the old file behind is exactly the residue an
-   * uninstall gets judged on. Runs once, at `apply`; a read-only directory has no
-   * new path to fold into and is skipped.
-   * @returns {boolean} whether a legacy file was found and removed
+   * 只读新路径会悄悄丢掉升级前做出的每一个每会话选择，而留下旧文件恰恰是
+   * 评判卸载干净与否时最扎眼的残留。在 `apply` 时运行一次；只读目录没有可
+   * 折入的新路径，直接跳过。
+   * @returns {boolean} 是否找到并删除了旧文件
    */
   function foldLegacyOverrides() {
     if (!writable || legacyOverrideFile === overrideFile) return false;
@@ -1546,7 +1699,7 @@ export function apply(ctx, config = {}) {
   foldLegacyOverrides();
 
   /**
-   * One persona's assembled text as the disk has it right now.
+   * 一个人设按磁盘当前内容的组装文本。
    * @returns {{ ok: boolean, text: string, name: string, problems: string[] } | null}
    */
   function personaText(id, withSkeleton = true) {
@@ -1575,11 +1728,10 @@ export function apply(ctx, config = {}) {
   }
 
   /**
-   * Text that is safe to hand to the renderer, or null.
+   * 可以安全交给渲染器的文本，或 null。
    *
-   * A persona still carrying an illegal `{{…}}` would take the whole system
-   * prompt down at interpolation time — the one failure this plugin must never
-   * cause. An unusable candidate is skipped, never sent.
+   * 仍带着非法 `{{…}}` 的人设会在插值时掀翻整份系统提示词——这是本插件
+   * 绝不能造成的那一种失败。不可用的候选被跳过，绝不上送。
    */
   function safeText(id, withSkeleton = true) {
     const candidate = personaText(id, withSkeleton);
@@ -1591,85 +1743,72 @@ export function apply(ctx, config = {}) {
   }
 
   /**
-   * Body only, for team mode.
+   * 只要正文，供团队模式。
    *
-   * A discussion has no tools, so pouring the solo skeleton into every member
-   * buys nothing and costs 1543 characters per head. The transferable part of
-   * that skeleton is emitted once by `TEAM_COMMON_RULES` instead. This is the
-   * same text minus the frame — not a shortened persona: her own words are
-   * untouched, only the shared wrapper is dropped.
+   * 讨论没有工具，把单人骨架浇进每个成员毫无收益，却让每个人头多付 1543
+   * 字符。骨架里可迁移的部分改由 `TEAM_COMMON_RULES` 输出一次。这是同一份
+   * 文本减去框架——不是缩短的人设：她自己的话原样保留，只去掉共享的外壳。
    */
   function personaBody(id) {
     return safeText(id, false);
   }
 
-  /** Last text each session was actually served — the final rung, never empty. */
+  /** 每个会话最近实际拿到的文本——最后一档，永不为空。 */
   const lastGood = new Map();
 
   /**
-   * The display names a session has already been served, oldest first.
+   * 会话已经收到过的显示名，最早的在前。
    *
-   * This exists because the system prompt is NOT the strongest identity signal in
-   * a request. Measured on a real conversation: after a switch the loop rewrites
-   * the prompt in place (the previous system node is emptied, only the new persona
-   * stays model-visible) and the new text is served correctly — and the model
-   * still answered as the FIRST persona it had introduced itself as. Its own
-   * earlier turns outrank the system prompt. A revocation that names that identity
-   * contradicts those turns; "all other identities are void" never says which words are wrong,
-   * and was measured not to work.
+   * 它存在是因为系统提示词不是请求里最强的身份信号。在真实对话上测过：
+   * 切换后循环会原地重写提示词（旧 system 节点被清空，只有新人设对模型可见），
+   * 新文本也正确送达——模型却仍以它最初自我介绍的那个人设作答。它自己更早
+   * 的回合压过系统提示词。点名撤销那个身份会与那些回合矛盾；"其他一切身份
+   * 一律作废"从不说哪些话作废，实测无效。
    */
   const servedNames = new Map();
-  /** Enough to name every identity the model could still be carrying. */
+  /** 足够点名模型可能仍携带的每一个身份。 */
   const SERVED_NAMES_LIMIT = 4;
 
   /**
-   * The persona each session was served at its LAST assembly.
+   * 每个会话上一次组装时收到的人设。
    *
-   * The question both the switch notice and the identity snapshot need answered
-   * is "is the persona spoken this round the same as last round?" — and the answer cannot come
-   * from the persona's SOURCE. `source === 'override'` was the old test for "this
-   * session was moved", and it is false on the way BACK: `/waifu-reset` (or a
-   * change to whichever persona the session is mounted on) resolves through the
-   * `mounted` rung while the conversation is still full of the persona served a
-   * moment ago.
+   * 切换提示与身份快照都要回答的问题是"这一轮说的人设和上一轮相同吗？"——
+   * 答案无法来自人设的 SOURCE。`source === 'override'` 曾是"这个会话被移动
+   * 过"的判据，它在回程上为假：`/waifu-reset`（或对会话所挂人设的修改）经由
+   * `mounted` 这一档解析，而对话里还满是上一刻送到的人设。
    *
-   * Measured in `session-a367789b`: `/waifu-reset` from 照桥心美 to the mounted
-   * 达克妮斯 rewrote the system node CORRECTLY (`system/message` carried 达克妮斯
-   * with no notice in front of it), the runtime snapshot silently dropped its
-   * identity section instead of naming the new persona, and the model answered as
-   * 照桥心美 — 「user (Somnivalis) asks 你是谁 … Komi would react with shock」 —
-   * its own earlier turns were the anchor, exactly as {@link identityNoticeOf}
-   * documents. A change is a change, whichever rung it lands on.
+   * 在 `session-a367789b` 上测过：从照桥心美 `/waifu-reset` 回挂载的达克妮斯
+   * 正确重写了 system 节点（`system/message` 带着达克妮斯、前面没有提示），
+   * 运行时快照却悄悄丢掉了身份段而不是点名新人设，模型照桥心美地答了下去
+   * ——「user (Somnivalis) asks 你是谁 … Komi would react with shock」——
+   * 它自己更早的回合就是锚，与 {@link identityNoticeOf} 记录的完全一致。
+   * 变了就是变了，落在哪一档都一样。
    */
   const servedIds = new Map();
 
   /**
-   * The last persona CHANGE per session: `{ id, previousId, previousName }`.
+   * 每个会话最近一次人设变更：`{ id, previousId, previousName }`。
    *
-   * A memo, not a counter: it is read back by both the persona text and the
-   * identity snapshot for as long as that persona is the one being served, so
-   * re-rendering an assembly cannot consume it or fire it twice. The loop only
-   * commits a runtime snapshot whose TEXT changed, so a memo that stays put
-   * produces no repeated message.
+   * 是备忘，不是计数器：只要送达的仍是那个人设，人设文本和身份快照都会
+   * 回读它，所以重复渲染一次组装不能把它消耗掉或触发两次。循环只在快照
+   * 文本变化时才提交，因此停在原处的备忘不会产生重复消息。
    */
   const lastSwitch = new Map();
 
-  /** Cached global default: the provider is synchronous, this read is not. */
+  /** 缓存的全局默认：provider 是同步的，而这次读取不是。 */
   let cachedDefault = { id: null, field: undefined, source: null, error: null, at: 0 };
 
   /**
-   * Re-read which wife the next session will actually use.
+   * 重读下一个会话实际会用哪个 wife。
    *
-   * The 2-second window below exists because `configEditor.edit()` settles the
-   * patch file before the Loader has re-activated the row, so a reread issued
-   * immediately after a write can still answer with the PREVIOUS id. Hiding that
-   * gap behind a cache is only honest for a write this process just made and has
-   * already CONFIRMED — which is why every writer goes through
-   * {@link verifyDefault} and only lands here once the live read agrees.
-   * `force` is how that verifier reads through the window instead of being fed
-   * its own optimism back.
+   * 下面的 2 秒窗口存在的原因是 `configEditor.edit()` 在 Loader 重新激活该行
+   * 之前就结清了 patch 文件，写完立刻发起的重读仍可能答出上一个 id。把那个
+   * 空档藏进缓存，只有对刚由本进程做出、且已经确认过的写入才是诚实的
+   * ——这正是每个写入方都走 {@link verifyDefault}、活读一致后才落到这里
+   * 的原因。`force` 就是那个校验器穿透窗口的方式，而不是被喂回它自己的
+   * 乐观。
    *
-   * @param {{ force?: boolean }} [options] `force` bypasses the post-write window
+   * @param {{ force?: boolean }} [options] `force` 绕过写入后的窗口
    */
   async function refreshDefault(options = {}) {
     if (
@@ -1700,29 +1839,26 @@ export function apply(ctx, config = {}) {
     return cachedDefault;
   }
 
-  /** Enough attempts, at 50ms, to outlast the Loader re-activating one row. */
+  /** 每 50ms 一次、足以熬过 Loader 重新激活一行的尝试次数。 */
   const DEFAULT_VERIFY_TRIES = 12;
   const DEFAULT_VERIFY_WAIT_MS = 50;
 
   /**
-   * Wait for a just-written `selectedDefault` to become what the registry holds.
+   * 等刚写下的 `selectedDefault` 变成注册表真正持有的东西。
    *
-   * The write is NOT the truth; the reread is. Reporting the write on its own is
-   * how the panel and the platform disagree: the roster and the panel readers
-   * then name an id the registry does not have, the row the user just moved the
-   * default off keeps wearing the active border (it only heals on next entry), and the
-   * next new task comes up on the profile default instead of the wife the user
-   * had just chosen. Poll briefly instead of guessing.
+   * 写入不是真相，重读才是。只报写入正是面板与平台各执一词的原因：花名册
+   * 和面板读取端会说出一个注册表没有的 id，用户刚把默认移走的那行继续挂着
+   * 激活边框（要到下次进入才愈合），下一个新任务落在 profile 默认上而不是
+   * 用户刚选的 wife。短轮询，不瞎猜。
    *
-   * `field` is the explicit `selectedDefault` as the settings face reports it —
-   * `null` when it is deliberately unset — and is `undefined` on a profile with
-   * no `settings` face at all. Only the first form can confirm a CLEAR; the
-   * roster faces resolve "unspecified" to the profile default and cannot tell the two
-   * apart, so they are checked against `previous` instead.
+   * `field` 是 settings 面所报的显式 `selectedDefault`——刻意未设时为
+   * `null`——在连 `settings` 面都没有的 profile 上是 `undefined`。只有第一种
+   * 形式能确认一次清除；花名册面会把"未指定"解析成 profile 默认，分不清
+   * 两者，所以改用 `previous` 来核对它们。
    *
-   * @param {string | null} wanted the value the write committed; `null` = specify nobody
-   * @param {{ previous?: string | null, checkable?: boolean }} [context] what the
-   *   read said before the write, and whether any face can confirm the field
+   * @param {string | null} wanted 写入提交的值；`null` = 不指定任何人
+   * @param {{ previous?: string | null, checkable?: boolean }} [context] 写入
+   *   之前读取说了什么，以及是否有哪个面能确认这个字段
    * @returns {Promise<{ id: string | null, verified: boolean, checkable: boolean, attempts: number }>}
    */
   async function verifyDefault(wanted, context = {}) {
@@ -1737,9 +1873,9 @@ export function apply(ctx, config = {}) {
         if (found.field === wanted)
           return { id: found.id, verified: true, checkable, attempts: attempt };
       } else if (seen !== null) {
-        // A roster face that carries `isDefault` resolved SOME id. For a non-null
-        // `wanted` that is a real check; for a clear it is the profile default
-        // showing through, which is why the clear path stays gated on `field`.
+        // 带着 `isDefault` 的花名册面解析出了某个 id。对非 null 的
+        // `wanted` 这是一次真核对；对清除来说那只是透出来的 profile 默认，
+        // 所以清除路径仍由 `field` 把门。
         if (wanted === null) {
           if (seen !== previous)
             return { id: seen, verified: true, checkable, attempts: attempt };
@@ -1754,7 +1890,7 @@ export function apply(ctx, config = {}) {
     }
     return { id: seen, verified: false, checkable, attempts: DEFAULT_VERIFY_TRIES };
   }
-  /** Which persona one session resolves to right now, and through which rung. */
+  /** 一个会话现在解析到哪个人设，经由哪一档。 */
   function sessionPersona(sessionId, mountedId) {
     const overrideId = overrideOf(sessionId);
     const rungs = orderPersonaIds({
@@ -1777,10 +1913,10 @@ export function apply(ctx, config = {}) {
   }
 
   /**
-   * The gate, bound to this session's live state.
+   * 绑定到本会话实时状态的闸门。
    *
-   * The decision itself lives in the exported {@link personaExpected} so it can
-   * be tested as a rule; this only supplies the three facts it needs.
+   * 决定本身放在导出的 {@link personaExpected} 里，作为规则接受测试；这里
+   * 只提供它需要的三件事实。
    */
   function expectsPersona(sessionId, mountedId) {
     return personaExpected({
@@ -1791,23 +1927,21 @@ export function apply(ctx, config = {}) {
   }
 
   /**
-   * Record what this assembly serves, and remember it when the persona CHANGED.
+   * 记录这次组装送达了什么，并在人设变更时记住它。
    *
-   * Called from the persona variable provider, which the assembler resolves
-   * BEFORE it renders the `systemPrompt.context()` contributions
-   * (`.ref/system-prompt.js`: `variables[name] = provider(context)` at :315, the
-   * context texts at :348), and `assemble()` runs once per step. That order is
-   * what lets {@link identityNoticeOf} read the memo back inside the same
-   * assembly, so the prompt and the snapshot always describe one turn.
+   * 由人设变量 provider 调用，组装器在渲染 `systemPrompt.context()` 贡献
+   * 之前解析它（`.ref/system-prompt.js`：`variables[name] = provider(context)`
+   * 在 :315，context 文本在 :348），而 `assemble()` 每步跑一次。这个顺序让
+   * {@link identityNoticeOf} 能在同一次组装内回读备忘，于是提示词与快照
+   * 描述的永远是同一个回合。
    *
-   * The FIRST sighting of a session records "nothing to re-anchor" rather than a
-   * change: a session that was never switched has a single voice, and its request
-   * must stay byte-for-byte what it would have been without this feature.
+   * 会话第一次出现时记录"没有要重新锚定的东西"而不是变更：从未切换过的
+   * 会话只有一个声音，它的请求必须与没有这个特性时逐字节相同。
    *
    * @param {string} sessionId
-   * @param {{ id: string, name: string }} found the persona about to be served
-   * @param {string} [previousName] the name served before this one, if any
-   * @returns {boolean} whether this turn is a change
+   * @param {{ id: string, name: string }} found 即将送达的人设
+   * @param {string} [previousName] 上一个送达的名字（若有）
+   * @returns {boolean} 本回合是否是变更
    */
   function noteServed(sessionId, found, previousName) {
     if (sessionId === "") return false;
@@ -1825,13 +1959,12 @@ export function apply(ctx, config = {}) {
   }
 
   /**
-   * The change this session is currently in the middle of, or null.
+   * 本会话当前正处于其中的人设变更，或 null。
    *
-   * Keyed on the persona being served, so the memo survives every later
-   * assembly of the same persona (same answer, same text, no new snapshot) and
-   * is replaced by the next change.
+   * 以正在送达的人设为键，所以同一人设之后的每次组装（同样的回答、同样的
+   * 文本、没有新快照）都消不掉这份备忘，直到被下一次变更替换。
    * @param {string} sessionId
-   * @param {{ id: string }} found the persona about to be served
+   * @param {{ id: string }} found 即将送达的人设
    * @returns {{ id: string, previousId: string, previousName: string } | null}
    */
   function switchOf(sessionId, found) {
@@ -1841,17 +1974,15 @@ export function apply(ctx, config = {}) {
   }
 
   /**
-   * Does this session need the identity said out loud — now, or since the last change?
+   * 这个会话需不需要把身份说出口——现在，或自上次变更以来？
    *
-   * True while the persona being served is one this session did not start out
-   * with: chosen out of band (an override — `/waifu-change`, the picker, a write
-   * from the panel) or the target of the most recent change (`/waifu-reset`
-   * included). It stays true for as long as that persona is served, which is what
-   * the shipped behaviour already did for overrides; keeping it that way also
-   * keeps the served text identical from turn to turn, so the loop rewrites the
-   * prompt once at the change instead of on every step.
+   * 只要送达的人设不是会话出生时的那个就为真：从旁路选定（一次覆盖
+   * ——`/waifu-change`、选择器、面板的一次写入）或最近一次变更的目标
+   * （`/waifu-reset` 也算）。送达那个人设期间它一直为真，已上线的行为对覆盖
+   * 本来就是这么做的；保持这样也让送达文本回合之间完全一致，循环只在变更
+   * 时重写一次提示词，而不是每步都重写。
    * @param {string} sessionId
-   * @param {{ id: string, source: string }} found the persona about to be served
+   * @param {{ id: string, source: string }} found 即将送达的人设
    * @returns {boolean}
    */
   function reAnchored(sessionId, found) {
@@ -1859,37 +1990,33 @@ export function apply(ctx, config = {}) {
   }
 
   /**
-   * The switch notice: in front of a persona that REPLACES another one, and again behind it.
+   * 切换提示：顶掉另一个人设的人设前面放一份，后面再放一份。
    *
-   * The persona text IS a system prompt, but swapping it mid-conversation is a
-   * weak signal: the history is already full of the previous voice, so a model
-   * that keeps answering as her is the single most-reported "switch did not take". Saying
-   * it in the served text is what re-anchors that turn.
+   * 人设文本就是系统提示词，但在对话中途换掉它是弱信号：历史里已经满是上一
+   * 位的声音，模型继续以她作答是报告最多的"切换没生效"。在送达的文本里把
+   * 它说出来，就是重新锚定那个回合的办法。
    *
-   * "Replaces another one" is a fact about the SESSION, not about which rung the
-   * persona came off — the first sentence of this comment used to promise that
-   * 「the mounted case needs no line, because there the text never changed under a
-   * running conversation」, and the log in {@link servedIds} shows the `mounted`
-   * rung arriving mid-conversation with a whole other persona behind it. The line
-   * is emitted whenever the served persona changed, mounted or not; see
-   * {@link noteServed}.
+   * "顶掉另一个"是关于会话的事实，与人设来自哪一档无关——这条注释的第一句
+   * 曾承诺「mounted 的情形不需要那句话，因为那里文本从未在运行中的对话底下
+   * 变过」，而 {@link servedIds} 的日志显示 `mounted`
+   * 一档带着身后整整另一个人设
+   * 在对话中途到达。只要送达的人设变了就发这句话，mounted 与否皆然；见
+   * {@link noteServed}。
    *
-   * It is said TWICE on purpose. `@deepseek-ai/dsh-persona` mounts this text as
-   * the one `complete: true` section, so the served string is the WHOLE prompt —
-   * and an incapable route makes the loop rewrite the FIRST system node in place,
-   * i.e. at position 0, ahead of a conversation that already contains the
-   * previous wife's turns (measured in `dsh-agent-loop`'s
-   * `SystemPromptProjection.project`: the replacement carries
-   * `surfaceOp: {op:'replace'}` on the head node). Instructions the model meets
-   * once, at the very top, are the ones it drifts away from; the trailer is
-   * placed where the settings end and the conversation begins.
+   * 刻意说两遍。`@deepseek-ai/dsh-persona` 把这段文本挂成唯一的
+   * `complete: true` 一节，所以送达的字符串就是整份提示词——而能力不足的
+   * 路由会让循环原地重写第一个 system 节点，即位置 0，处在一个已经装着上一
+   * 位 wife 回合的对话之前（在 `dsh-agent-loop` 的
+   * `SystemPromptProjection.project` 上测过：替换在头节点上携带
+   * `surfaceOp: {op:'replace'}`）。模型只在最顶上见一次的指令正是它会飘走的
+   * 指令；尾注放在设定结束、对话开始的地方。
    *
-   * `previous` names the personas this session was served before now, and they are
-   * spelled out for the reason in {@link servedNames}.
-   * @param {string} text the assembled persona
-   * @param {string} name her display name
-   * @param {string[]} [previous] identities served earlier in this session
-   * @returns {string} the text to serve
+   * `previous` 列出本会话此前被送达过的人设，逐一点名的原因见
+   * {@link servedNames}。
+   * @param {string} text 组装好的人设
+   * @param {string} name 她的显示名
+   * @param {string[]} [previous] 本会话更早送达过的身份
+   * @returns {string} 要送达的文本
    */
   function withSwitchNotice(text, name, previous = []) {
     if (config.switchNotice === false) return text;
@@ -1909,22 +2036,20 @@ export function apply(ctx, config = {}) {
   }
 
   /**
-   * The persona this session is ACTUALLY anchored to, right now.
+   * 本会话此刻实际锚定的人设。
    *
-   * The session header keeps only the preset the session was born with, and it
-   * never moves again. The live answer lives in the `agentPreset` session
-   * projection, which every `agent-preset/selected` event advances — the
-   * registry says so itself (`dsh-agent-preset-registry/lib/index.js:42`:
+   * 会话 header 只保存会话出生时的预设，此后永不再动。活的答案住在
+   * `agentPreset` 会话投影里，每个 `agent-preset/selected` 事件都会推进它
+   * ——注册表自己就是这么说的（`dsh-agent-preset-registry/lib/index.js:42`：
    * "Reconstruction reads the `agentPreset` Session projection, never the
-   * header"). Reading the header is how a session re-pointed from the UI kept
-   * answering as the plugin's global default: the title-bar tag showed the
-   * newly chosen name while the prompt still carried the stale one, so every
-   * later choice looked like it had not taken.
+   * header"）。读 header 正是从 UI 重新指向的会话继续以插件全局默认作答的
+   * 原因：标题栏标签显示新选的名字，提示词里却还是旧的，于是之后的每次选择
+   * 看起来都像没生效。
    *
-   * Falls back to the header only when no projection service is reachable; the
-   * provider here is synchronous, so this must stay synchronous too.
-   * @param {unknown} agent the live agent
-   * @returns {string} the anchor preset id, or `""` when there is none
+   * 只在投影服务不可达时才退回 header；这里的 provider 是同步的，所以它也
+   * 必须保持同步。
+   * @param {unknown} agent 活跃 agent
+   * @returns {string} 锚定预设 id；没有时为 `""`
    */
   function anchorOf(agent) {
     const session = agent?.session;
@@ -1934,20 +2059,19 @@ export function apply(ctx, config = {}) {
       const projected = oneLine(projections?.stateOf?.(session, "agentPreset"));
       if (projected !== "") return projected;
     } catch {
-      // No projection service (or none for this key): the header is the only
-      // thing left to read, and "no anchor" beats a throw in this path.
+      // 没有投影服务（或这个键没有）：header 是剩下的唯一可读物，
+      // 在这条路径上"没有锚定"好过抛错。
     }
     return oneLine(session.header?.agentPreset);
   }
 
   /**
-   * A service, looked up the two ways a cordis context offers it.
+   * 取一个服务，用 cordis 上下文提供的两种方式查找。
    *
-   * `ctx.name` is the declared form and is the one to trust: a name in this
-   * plugin's `inject` list is guaranteed present, while a bare `ctx.get(name)`
-   * answers only while the providing fiber is ACTIVE — the same trap the
-   * plugin-manager lookup documents. Neither form is allowed to throw here,
-   * because every caller has a defined "not available" answer.
+   * `ctx.name` 是声明式取法，也是该信的那种：本插件 `inject` 列表里的名字
+   * 保证在场，而裸的 `ctx.get(name)` 只在提供方 fiber 活跃期间有答案
+   * ——插件管理器查找文档记载的正是同一个陷阱。两种取法在这里都不允许
+   * 抛错，因为每个调用者都有定义好的"不可用"答案。
    *
    * @param {string} name
    * @returns {object | undefined}
@@ -1957,7 +2081,7 @@ export function apply(ctx, config = {}) {
       const declared = ctx[name];
       if (declared !== undefined && declared !== null) return declared;
     } catch {
-      /* a strict context refuses the property read; `get` may still answer */
+      /* 严格的上下文拒绝属性读取；`get` 仍可能作答 */
     }
     try {
       return ctx.get(name) ?? undefined;
@@ -1967,13 +2091,11 @@ export function apply(ctx, config = {}) {
   }
 
   /**
-   * Every Agent this process is currently driving, or `undefined` when the
-   * service is not there to ask.
+   * 本进程当前在驱动的每一个 Agent；服务不在、无法询问时为 `undefined`。
    *
-   * `undefined` and `[]` are kept apart on purpose: an empty list means "nobody
-   * is live", while a missing service means "this build does not let me look" —
-   * and the caller that moves sessions needs to tell those apart to know whether
-   * doing nothing was a decision or a failure.
+   * `undefined` 与 `[]` 刻意分开：空列表意思是"没有人活着"，服务缺失意思是
+   * "这个构建不让我看"——移动会话的调用者需要区分这两者，才知道什么都不做
+   * 是决定还是失败。
    *
    * @returns {object[] | undefined}
    */
@@ -1982,7 +2104,7 @@ export function apply(ctx, config = {}) {
     return typeof registry?.list === "function" ? registry.list() : undefined;
   }
 
-  /** The live agent for a session id, while this process still has one. */
+  /** 会话 id 对应的活跃 agent，前提是本进程还有一个。 */
   function liveAgentFor(sessionId) {
     if (sessionId === "") return undefined;
     const live = liveAgents();
@@ -1991,16 +2113,15 @@ export function apply(ctx, config = {}) {
   }
 
   /**
-   * What a session's chip is showing right now.
+   * 会话的 chip 此刻显示的是什么。
    *
-   * The projection, not the header: `agentPresetProjectionDefinition.init` reads
-   * `header.agentPreset` once and every later move is an `agent-preset/selected`
-   * event folded on top, so the two disagree the moment a session has been
-   * re-selected — which is the whole subject here. The header is only the
-   * fallback for a build whose projections service is not reachable.
+   * 看投影，不看 header：`agentPresetProjectionDefinition.init` 只读一次
+   * `header.agentPreset`，之后的每次移动都是叠上去的 `agent-preset/selected`
+   * 事件，所以会话一旦被重新选过两者就不一致——这正是本函数的主题。header
+   * 只是投影服务不可达的构建的后备。
    *
    * @param {object} session
-   * @returns {string} the id, or "" when nothing names one
+   * @returns {string} 该 id；什么都没指名时为 ""
    */
   function shownPresetOf(session) {
     try {
@@ -2010,42 +2131,38 @@ export function apply(ctx, config = {}) {
         if (typeof value === "string" && value !== "") return value;
       }
     } catch {
-      /* fall through to the header */
+      /* 落回 header */
     }
     return oneLine(session?.header?.agentPreset);
   }
 
   /**
-   * Move the session's own preset label onto the wife it is now talking as.
+   * 把会话自己的预设标签挪到它此刻正在扮演的 wife 上。
    *
-   * The chip above a conversation is not ours: `ui-agent-preset` renders
-   * `session.projectionValues.agentPreset` (`presetOf`), and that projection is
-   * advanced by exactly one event type —
+   * 对话上方的 chip 不是我们的：`ui-agent-preset` 渲染
+   * `session.projectionValues.agentPreset`（`presetOf`），而那个投影恰好由
+   * 一种事件类型推进——
    *
    *     apply: (state, event) =>
    *       event.type === "agent-preset/selected" ? event.data.agentPreset : state
    *
-   * — written by the platform's own `select()`. Which is why a switched session
-   * kept showing the wife it was BORN with, and why "can this be adjusted dynamically" had no
-   * obvious answer.
+   * ——由平台自己的 `select()` 写入。这正是切换过的会话一直显示出生时那个
+   * wife 的原因，也是"这个能不能动态调"没有明显答案的原因。
    *
-   * `select()` itself is unavailable here: for a session that has already opened
-   * a turn it throws `agent-preset/locked`, because naming a new preset means
-   * rebuilding that preset's whole plugin tree — tools included. This appends the
-   * event ALONE, which moves the label and changes nothing about the running
-   * tree. The persona is already served by the override, so what the label says
-   * and what the model is told finally agree.
+   * `select()` 本身在这里不可用：对已经开了回合的会话它抛
+   * `agent-preset/locked`，因为指名新预设意味着重建那棵预设的整棵插件树
+   * ——工具也在内。这里只追加事件本身，它移动标签而不动运行中的树。人设
+   * 本来就由覆盖送达，标签说的话与模型被告知的终于一致。
    *
-   * Two guards, both load-bearing:
-   *   - Only a REGISTERED preset may be named. The value is persisted, and a
-   *     restored session mounts what its projection names — an id nobody serves
-   *     would turn the next resume into a failed restore.
-   *   - `syncSessionChip: false` turns the whole thing off, because naming the
-   *     wife here is also what makes a resumed session come back as her.
+   * 两道护栏，都承重：
+   *   - 只能指名已注册的预设。这个值会被持久化，恢复的会话挂载其投影指名的
+   *     东西——没人服务的 id 会把下一次恢复变成失败的恢复。
+   *   - `syncSessionChip: false` 把整件事关掉，因为在这里指名 wife，也正是
+   *     恢复的会话以她身份回来的原因。
    *
-   * @param {unknown} agent the live agent owning the session
-   * @param {string} id the persona id to name
-   * @returns {boolean} whether the label was moved
+   * @param {unknown} agent 拥有该会话的活跃 agent
+   * @param {string} id 要指名的人设 id
+   * @returns {boolean} 标签是否被移动
    */
   function rememberSessionPreset(agent, id) {
     if (config.syncSessionChip === false) return false;
@@ -2064,24 +2181,23 @@ export function apply(ctx, config = {}) {
   }
 
   /**
-   * Put the label back on what this session resolves to with no override: the
-   * preset it runs with on its own, else the global default.
+   * 把标签放回这个会话在无覆盖时解析到的东西：它自己运行所用的预设，否则
+   * 是全局默认。
    *
-   * `/waifu-reset` used to leave the chip naming the wife that had just been
-   * dropped, which is the same lie in the other direction.
+   * `/waifu-reset` 过去会让 chip 继续写着刚被放下的那个 wife，那是同一个
+   * 谎言的另一个方向。
    *
-   * Three answers exist for "the session's own preset", and they disagree as
-   * soon as the session was re-picked on the new-task screen:
+   * "会话自己的预设"有三个答案，会话在新建任务屏被重新挑过之后三者就彼此
+   * 不一致：
    *
-   *   - what the override record remembered (`ownPreset`, see `setOverride`) —
-   *     the only correct one, because the plugin's own chip-sync has since moved
-   *     the projection onto the override;
-   *   - the header, which names the preset the session was BORN with;
-   *   - the plugin's global default, when neither of the above is usable.
+   *   - 覆盖记录记住的东西（`ownPreset`，见 `setOverride`）——唯一正确的
+   *     那个，因为插件自己的 chip 同步已在此之后把投影挪到了覆盖上；
+   *   - header，写着会话出生时的预设；
+   *   - 插件的全局默认，以上两者都不可用时。
    *
-   * @param {unknown} agent the live agent owning the session
-   * @param {string} [ownPreset] the remembered own preset, best answer first
-   * @returns {boolean} whether the label was moved
+   * @param {unknown} agent 拥有该会话的活跃 agent
+   * @param {string} [ownPreset] 记住的自有预设，最优答案在前
+   * @returns {boolean} 标签是否被移动
    */
   function restoreSessionPreset(agent, ownPreset) {
     if (config.syncSessionChip === false) return false;
@@ -2089,8 +2205,8 @@ export function apply(ctx, config = {}) {
     if (session === undefined || session === null) return false;
     const remembered = oneLine(ownPreset);
     const mounted = oneLine(session.header?.agentPreset);
-    // A remembered or mounted id is whatever the session already had, so it is
-    // safe by construction. The default is only usable when it is one of ours.
+    // 记住的或挂载的 id 都是会话本来就有过的东西，因此构造上就安全。
+    // 默认只有在我们的人设之中时才可用。
     const resting =
       remembered !== "" ? remembered : mounted !== "" ? mounted : oneLine(cachedDefault.id);
     if (resting === "") return false;
@@ -2107,43 +2223,38 @@ export function apply(ctx, config = {}) {
   }
 
   /**
-   * Move the unstarted sessions onto the default that was just made theirs.
+   * 把还没开始的会话挪到刚被设为默认的那个人设上。
    *
-   * Writing `selectedDefault` only decides what a session created LATER will be
-   * stamped with. A session that already exists — including the blank one sitting
-   * on the new-task screen, whose chip is the thing the user is actually looking
-   * at — keeps the `agentPreset` its header was stamped with at creation, because
-   * `agentPresetProjectionDefinition.init` reads the header once and only an
-   * `agent-preset/selected` event ever moves it afterwards.
+   * 写 `selectedDefault` 只决定更晚创建的会话会被盖上什么章。已经存在的会话
+   * ——包括停在新建任务屏上的那个空白会话，用户实际盯着的就是它的 chip
+   * ——保有其 header 在创建时被盖上的 `agentPreset`，因为
+   * `agentPresetProjectionDefinition.init` 只读一次 header，之后只有
+   * `agent-preset/selected` 事件能移动它。
    *
-   * That is the second half of what `Settings → Agent Presets` does, and the half
-   * a settings write cannot reproduce. Its `save()` runs
+   * 这是 `Settings → Agent Presets` 所做事情的后半，也是一次设置写入无法
+   * 复现的那一半。它的 `save()` 运行
    *
    *     await write()            // settings.update(ns, { selectedDefault })
    *     await this.load()        // re-read the roster
    *     await sync(selected.id)  // syncBlankSession → seat.apply() → select()
    *
-   * so the official page moves the default AND re-seats the blank session on it,
-   * while the plugin used to do only the first. The chip then kept naming the wife
-   * the blank session was born with: "changed the default in the plugin, but the new session did not follow", with the
-   * registry already correct — which is why the Agent-Presets page showed the
-   * right badge at the same moment.
+   * 所以官方页面移动默认并把空白会话重新安置到其上，而插件过去只做前者。
+   * chip 于是继续写着空白会话出生时的那个 wife："在插件里改了默认，新会话却
+   * 没跟上"，而注册表其实已经是对的——这正是同一时刻 Agent-Presets 页面
+   * 显示着正确徽章的原因。
    *
-   * `select()` is the mover, not a hand-rolled append. For a session that has not
-   * opened a turn it re-binds the preset tree and THEN appends the event, which is
-   * what keeps the chip and the composition agreeing; an append alone would leave
-   * the new label on top of the old tree. It also brings the guard we want for
-   * free: a session that has already started a turn is refused with
-   * `agent-preset/locked`, so the refusals are the filter instead of a blank test
-   * guessed from here.
+   * `select()` 是搬运者，不是手搓的 append。对还没开回合的会话，它先重新
+   * 绑定预设树、再追加事件，这才是 chip 与组合保持一致的原因；只追加会把
+   * 新标签压在旧树上。它还免费带来我们想要的护栏：已经开了回合的会话会被
+   * `agent-preset/locked` 拒绝，于是拒绝本身就是过滤器，代替在这里瞎猜的
+   * 空白判据。
    *
-   * The blast radius is held to sessions that were still following the PREVIOUS
-   * default. One the user pointed somewhere else on purpose — a new-task screen
-   * already staged onto `minimal`, say — must not be dragged along by a change
-   * to the global default.
+   * 影响半径限定在仍跟随上一个默认的会话。被用户有意指向别处的会话
+   * ——比如新建任务屏已经先停在 `minimal` 上的——绝不能被全局默认的改动
+   * 顺带拖走。
    *
-   * @param {{ to: string, from: string | null }} options the resolved default
-   *   after the write, and the resolved default before it
+   * @param {{ to: string, from: string | null }} options 写入之后与写入之前
+   *   各自解析出的默认
    * @returns {Promise<{ moved: string[], refused: number, reason: string | null }>}
    */
   async function resettleUnstarted({ to, from }) {
@@ -2174,9 +2285,8 @@ export function apply(ctx, config = {}) {
         await presets.select(agent, to);
         done.moved.push(oneLine(session.id));
       } catch {
-        // `agent-preset/locked` for a session that has already started a turn —
-        // the platform refusing is the correct answer, not a failure worth
-        // reporting.
+        // 已经开了回合的会话会得到 `agent-preset/locked`——平台的拒绝是正确
+        // 答案，不是值得上报的失败。
         done.refused += 1;
       }
     }
@@ -2184,51 +2294,42 @@ export function apply(ctx, config = {}) {
   }
 
   /**
-   * **There is no team block in the served prompt, and deleting it is a fix.**
+   * **送达的提示词里没有团队块，删掉它就是修复。**
    *
-   * This used to call `teamRuntime.stage(agent)` on every assembly and append
-   * whatever text came back. In v3 that text is always `""` — a discussion
-   * builds its own request and installs nothing on the root agent — so the call
-   * bought nothing, while costing a full team resolve on every step: read the
-   * team store, scan the persona directory, resolve every member.
+   * 过去每次组装都会调用 `teamRuntime.stage(agent)` 并追加返回的任何文本。
+   * 在 v3 里那段文本永远是 `""`——讨论自建请求、不在根 agent 上安装任何
+   * 东西——所以这个调用买不到任何东西，却让每一步都付一次完整的团队解析：
+   * 读团队存储、扫人设目录、解析每个成员。
    *
-   * The platform resolves **every** registered prompt variable on every step,
-   * whether or not the template references it
-   * (`@deepseek-ai/dsh-system-prompt:315-316`). So that resolve was paid by
-   * every session of every kind, every step, forever, for a string that was
-   * either empty or appended to a prompt a team turn never reads.
+   * 平台在每一步都解析 **每一条** 注册的提示词变量，无论模板是否引用
+   * （`@deepseek-ai/dsh-system-prompt:315-316`）。于是一切会话、每一步、
+   * 永远都在为这串要么为空、要么被追加到团队回合根本不会读的提示词后面的
+   * 字符串付账。
    *
-   * The drift notices are not lost, because they were never the right channel:
-   * `/waifu-team` reports them at bind time and `stateOf` reports them to the
-   * panel. A team that silently degrades stays visible through the thing the
-   * user just typed, which is where they would look anyway.
+   * 漂移通知没有丢失，因为它们从来就不是对的通道：`/waifu-team` 在绑定时
+   * 上报它们，`stateOf` 把它们报给面板。悄悄降级的团队经由用户刚敲下的东西
+   * 保持可见——那本来就是他们会去看的地方。
    */
 
   /**
-   * The prompt variable every persona row points at; called once per assembly.
+   * 每个人设行都指向的提示词变量；每次组装调用一次。
    *
-   * ## The two early returns ARE the cost model
+   * ## 两个提前返回本身就是成本模型
    *
-   * The platform resolves **every** registered prompt variable on **every**
-   * step, whether or not the template being assembled references it
-   * (`@deepseek-ai/dsh-system-prompt:315-316`). "Nobody asks for it" therefore
-   * saves tokens but not work: whatever this function does, it does for every
-   * session in the process, on every assembly. Two answers have to leave before
-   * a single file is touched:
+   * 平台在 **每一步** 都解析 **每一条** 注册的提示词变量，无论正在组装的
+   * 模板是否引用它（`@deepseek-ai/dsh-system-prompt:315-316`）。所以"没人
+   * 要它"省的是 token 不是工时：这个函数做什么，就是在每次组装里为本进程的
+   * 每个会话做。碰到一个文件之前必须先放走两个答案：
    *
-   *   1. **A session born on a team preset.** Its preset names a team, not a
-   *      file, and a team turn builds its own request — the root prompt is
-   *      never read by the discussion. This used to fall through to the
-   *      `default` rung and pour the **global default** persona into a team
-   *      session, which was not merely wasted: it put an unrelated single-voice
-   *      prompt into every turn the team does not own.
-   *   2. **A session that never asked for a persona** — a plain platform preset
-   *      with no `/waifu-change` (see `personaExpected`). One `existsSync` is
-   *      all this path may cost.
+   *   1. **出生在团队预设上的会话。** 它的预设指名一个团队而不是文件，团队
+   *      回合自建请求——讨论从不读根提示词。这过去会落到 `default` 一档，把
+   *      **全局默认** 人设浇进团队会话，那不只是浪费：它把一段不相干的单人
+   *      提示词塞进了每个不属于团队的回合。
+   *   2. **从没要求过人设的会话**——不带 `/waifu-change` 的普通平台预设
+   *      （见 `personaExpected`）。这条路径至多花一次 `existsSync`。
    *
-   * It must never throw and never return text the renderer would choke on: a
-   * throw here means the session cannot start at all, which is a far worse
-   * outcome than serving the previous persona one turn too long.
+   * 它绝不能抛错，也绝不能返回渲染器咽不下去的文本：这里抛错意味着会话根本
+   * 起不来，比多送一个回合旧人设糟得多。
    */
   function resolvePersonaText(context) {
     const agent = context?.agent;
@@ -2237,23 +2338,20 @@ export function apply(ctx, config = {}) {
     const mountedId = anchorOf(agent);
     const onTeamPreset = teamNameForPreset(mountedId) !== null;
     /*
-     * A session *actually running* a team discussion gets no persona body: the
-     * discussion builds its own request and never reads the root prompt. The
-     * test is `isTeamSession` (off/bound lookups only, no disk), **not**
-     * `teamNameForPreset(mountedId) !== null`: the latter stays true for a
-     * session that was *born* on a team preset even after it left team mode,
-     * which is exactly how a session could read as a bare, no-persona model.
+     * *真的在跑* 团队讨论的会话拿不到人设正文：讨论自建请求，从不读根提示词。
+     * 判据是 `isTeamSession`（只查 off/bound，不碰磁盘），**不是**
+     * `teamNameForPreset(mountedId) !== null`：后者对 *出生* 在团队预设上的
+     * 会话在离开团队模式之后仍然为真，这正是一个会话可能读起来像赤裸的
+     * 无人设模型的途径。
      *
-     * A session born on a team preset but no longer on it (e.g. the team
-     * shrunk to one member, or the user moved off it) falls through to the
-     * normal rungs below — where `sessionPersona` skips the team-preset id (its
-     * persona file does not exist) and lands on the default persona.
+     * 出生在团队预设上、但已不在其上的会话（例如团队缩到一名成员，或用户
+     * 移出了它）落到下面的正常档位——那里 `sessionPersona` 会跳过团队预设
+     * id（它的人设文件不存在），落在默认人设上。
      */
     if (onTeamPreset) {
       if (teamRuntime?.isTeamSession?.(agent) === true) return "";
-      // Not on a team any more: skip the `expectsPersona` gate (which answers
-      // false for a team preset — no persona row, no override) and serve the
-      // default rung directly.
+      // 已经不在团队上：跳过 `expectsPersona` 闸门（对团队预设它答 false
+      // ——没有人设行，没有覆盖），直接送达默认那一档。
     } else if (!expectsPersona(sessionId, mountedId)) {
       return "";
     }
@@ -2261,11 +2359,10 @@ export function apply(ctx, config = {}) {
       const found = sessionPersona(sessionId, mountedId);
       if (found.text !== null) {
         const before = sessionId === "" ? [] : (servedNames.get(sessionId) ?? []);
-        // Recorded here, not by the caller: this provider is the only place that
-        // knows what a turn was actually served, and it runs first (see
-        // `noteServed`). What decides the notice is whether this round's persona
-        // differs from the last round's — a fact about the session, not about
-        // which rung served it.
+        // 在这里记录，而不是由调用者记录：这个 provider 是唯一知道一个回合
+        // 实际送达了什么的地方，而且它先跑（见 `noteServed`）。决定提示与否
+        // 的是这一轮的人设是否不同于上一轮——这是关于会话的事实，与哪一档
+        // 送达了它无关。
         noteServed(sessionId, found, before[before.length - 1]);
         const served = reAnchored(sessionId, found)
           ? withSwitchNotice(found.text, found.name, before)
@@ -2287,10 +2384,9 @@ export function apply(ctx, config = {}) {
       );
     }
     /*
-     * Reached only by a session this plugin owns whose file is temporarily
-     * unreadable — the team rung left with the early return above. Serving the
-     * last good text is better than serving nothing, and better than serving
-     * somebody else.
+     * 只有本插件拥有的、文件暂时读不出的会话才会走到这里——团队那一档已
+     * 经在上面的提前返回里离开了。送上一份最近的好文本，好过什么都不送，
+     * 也好过送别人。
      */
     const previous = sessionId === "" ? undefined : lastGood.get(sessionId);
     if (previous !== undefined) return previous;
@@ -2300,88 +2396,80 @@ export function apply(ctx, config = {}) {
     return "";
   }
 
-  /** Registered once, at apply: it outlives every preset and every session. */
+  /** 在 apply 时注册一次：它比每个预设、每个会话都活得久。 */
   ctx.systemPrompt.variable("waifu_persona", resolvePersonaText);
 
-  /** Ours alone; `contexts` reject a duplicate name inside one scope. */
+  /** 只归我们；`contexts` 拒绝同一作用域内的重名。 */
   const IDENTITY_CONTEXT_NAME = "waifu-agents:identity";
-  /** Last, so the identity is the final line of the snapshot the model reads. */
+  /** 排最后，身份因此是模型读到的快照的最后一行。 */
   const IDENTITY_CONTEXT_ORDER = 900;
 
   /**
-   * The per-turn identity snapshot — the only channel that actually re-anchors a switch.
+   * 每回合的身份快照——唯一真正能重新锚定一次切换的通道。
    *
-   * The persona is a system prompt, and swapping a system prompt mid-conversation
-   * turned out to be too weak a signal. Measured on this profile
-   * (`commandcode` / `deepseek-v4-flash`, `session-b6fb8a2b`):
+   * 人设是系统提示词，而对话中途换系统提示词被证明是太弱的信号。在这个
+   * profile 上测过（`commandcode` / `deepseek-v4-flash`，`session-b6fb8a2b`）：
    *
-   *   - three `/waifu-change` calls, and the session surface ended up with a
-   *     single system node carrying the NEWEST wife (2084 chars, the only
-   *     `system: true` node in `contextBreakdown`, `surfaceOp: {op:'replace'}`,
-   *     `cacheReadTokens: 0` — so the request really did carry it);
-   *   - and the model answered as the FIRST wife all three times, reasoning
-   *     「the system prompt of this session says I'm 宫内光华」 while the request
-   *     said otherwise. Its own two earlier answers were the anchor, not the
-   *     prompt.
+   *   - 连做三次 `/waifu-change`，会话表面最终只剩一个 system 节点，带着最新的
+   *     wife（2084 字符，`contextBreakdown` 里唯一 `system: true` 的节点，
+   *     `surfaceOp: {op:'replace'}`，`cacheReadTokens: 0`——所以请求真的带上
+   *     它了）；
+   *   - 而模型三次都以第一位 wife 作答，推理时说「the system prompt of this
+   *     session says I'm 宫内光华」，尽管请求里不是这样。它自己更早的两条
+   *     回答才是锚，提示词不是。
    *
-   * So the identity is said again where the model cannot get away from it. A
-   * `systemPrompt.context()` contribution is NOT a prompt section: the loop
-   * projects it into the session surface as a USER-role snapshot appended AFTER
-   * the user's message (`dsh-agent-loop` `preStep` → `RuntimeContextProjection`),
-   * wrapped in the platform's own header — 「Current runtime context. This
-   * snapshot supersedes earlier runtime-context snapshots.」 And it is re-emitted
-   * only when its text CHANGES, which is exactly when the wife changes.
+   * 所以身份要在模型逃不开的地方再说一遍。`systemPrompt.context()` 贡献不是
+   * 提示词的一节：循环把它作为 USER 角色的快照投影进会话表面，追加在用户
+   * 消息之后（`dsh-agent-loop` 的 `preStep` → `RuntimeContextProjection`），
+   * 外面包着平台自己的头部——「Current runtime context. This snapshot
+   * supersedes earlier runtime-context snapshots.」而且只有当它的文本变化时
+   * 才重新发出，这正是 wife 变化的时刻。
    *
-   * Two consequences worth remembering:
-   *   - The snapshot name goes through `interpolate()`, so this text must never
-   *     contain a `{{…}}` group.
-   *   - `@deepseek-ai/dsh-persona` ships in `template.json` with
-   *     `includeRuntimeContext: false`, and that suppressor drops EVERY context
-   *     in the agent scope — this one included. The template row has to stop
-   *     suppressing before any of this is served.
+   * 两个值得记住的推论：
+   *   - 快照文本过去要过 `interpolate()`，那把它变成一条要记住的规矩：这里
+   *     绝不能出现任何 `{{…}}` 组。下面的注册现在传 `interpolate: false`，
+   *     于是这不再是规矩，而成为代码的性质——名字碰巧长得像占位符的人设
+   *     再也弄不坏一个回合。
+   *   - `@deepseek-ai/dsh-persona` 在 `template.json` 里带着
+   *     `includeRuntimeContext: false`，而那个抑制器会丢掉 agent 作用域里的
+   *     每一个 context——包括这一个。模板行必须先停止抑制，这一切才送得到。
    *
-   * Empty for a session nobody switched, on purpose: an untouched session has a
-   * single voice and needs no reminder, and staying silent keeps its prompt
-   * byte-for-byte what it was before this existed.
+   * 没人切换过的会话为空，刻意的：没动过的会话只有一个声音，不需要提醒，
+   * 保持沉默让它的提示词与本特性出现之前逐字节相同。
    *
-     * The condition is whether this round's persona differs from the last round's,
-     * never whether it was resolved from the override rung. The second reading is what
-     * shipped first, and `/waifu-reset` is
-   * its counter-example: coming back to the mounted persona resolves through the
-   * `mounted` rung, so the reminder went silent on the one turn the model had a
-   * competing voice to drop. See {@link servedIds} for the measurement.
+     * 条件是这一轮的人设是否不同于上一轮的，绝不看它是否由覆盖那一档解析
+     * 而来。第二种读法是最先上线的，`/waifu-reset` 正是
+   * 它的反例：回到挂载人设经由 `mounted` 一档解析，于是提醒恰好在模型有一个
+   * 竞争声音需要丢掉的那个回合哑掉了。测量见 {@link servedIds}。
    *
-   * @param {unknown} agent the live agent
-   * @returns {string} the snapshot text, or `''` when there is nothing to say
+   * @param {unknown} agent 活跃 agent
+   * @returns {string} 快照文本；无话可说时为 `''`
    */
   function identityNoticeOf(agent) {
     const raw = agent?.session?.id;
     const sessionId = typeof raw === "string" ? raw : "";
     if (sessionId === "") return "";
     /*
-     * A session that never had a persona has no identity to re-anchor, and
-     * saying nothing is the whole contract for it. Checked before the lookup so
-     * a plain preset does not pay for pouring a default persona only to discard
-     * the result (see `personaExpected`).
+     * 从来没有人设的会话没有要重新锚定的身份，什么都不说就是对它的全部承诺。
+     * 在查找之前判，让普通预设不必为浇一份默认人设又把结果扔掉而付费
+     * （见 `personaExpected`）。
      */
     const mountedId = anchorOf(agent);
     if (!expectsPersona(sessionId, mountedId)) return "";
     try {
       const found = sessionPersona(sessionId, mountedId);
       if (found.id === null) return "";
-      // "Did the persona change" — asked of the session, not of the rung it came
-      // off. The old test here was `found.source !== "override"`, which is true on
-      // the way back to the mounted persona and silenced exactly the reset that
-      // needed the reminder most (see `servedIds`).
+      // "人设变了吗"——问的是会话，不是它来自哪一档。这里的旧判据是
+      // `found.source !== "override"`，它在回到挂载人设的路上为真，恰好在
+      // 最需要提醒的那次重置上哑掉（见 `servedIds`）。
       const moved = switchOf(sessionId, found);
       if (moved === null && found.source !== "override") return "";
       const was = moved === null ? "" : moved.previousName;
       const from = was !== "" && was !== found.name ? `（上一轮还是「${was}」）` : "";
       return `【本轮身份 · 运行时确认】这个会话现在的人设是「${found.name}」${from}。上面更早出现的其它人设、以及你自己之前以别人身份说过的话，从现在起全部作废：按「${found.name}」说话、按她的口气思考。不要向用户解释这次变化，也不要提你「之前」是谁。`;
     } catch (error) {
-      // Never throw: this runs inside `assemble()`, and a throw there fails the
-      // whole request. Serving the previous identity one turn too long is the
-      // far smaller loss.
+      // 绝不抛错：它跑在 `assemble()` 里面，那里抛错会让整个请求失败。
+      // 多送一个回合旧身份是小得多的损失。
       ctx.logger?.warn?.(
         `dsh-waifu-agents: 组装身份快照失败：${error?.message ?? error}`,
       );
@@ -2392,23 +2480,237 @@ export function apply(ctx, config = {}) {
   ctx.systemPrompt.context({
     name: IDENTITY_CONTEXT_NAME,
     order: IDENTITY_CONTEXT_ORDER,
+    /* 人设的 NAME 是文件数据。理由与下面的记忆块相同。 */
+    interpolate: false,
     text: (context) =>
       config.identityReminder === false ? "" : identityNoticeOf(context?.agent),
   });
 
-  // The registry writes `selectedDefault` through the settings document, so this
-  // is the one signal that keeps the synchronous cache honest.
+  /* ------------------------------------------------- 人设长期记忆 */
+
+  /*
+   * 人设长记忆的存储半（身份快照、记忆归档、团队记忆视图）已搬进
+   * `memory-ops.js`，与面板的 memory op 实现合住一个模块（它们共享
+   * refreshMemorySnapshot / personaMemoryForTeam 这条读写链）。它在本文件
+   * 后部的 "persona long-term memory ops" 原位置安装，晚于旧位置的原因见
+   * 那里的接线注释。
+   */
+  /* ------------------------------------------- 写入路径：一个完成的回合 */
+
+  /**
+   * 记忆写入者的回合状态。
+   *
+   * 插件过去完全没有"这个回合结束了"的信号，这正是人设永远记不住自己说过
+   * 什么的原因。host 的会话事件流带着它：每步一条 `assistant/message`（落盘
+   * 文本、`interrupted` 标志），以及带 `reason.kind` 的 `turn/end`。只有
+   * `completed` 会变成记忆——`aborted`、`interrupted`、`blocked`、
+   * `max-tokens` 与 `error` 都意味着模型产出的文本不是用户收到的，此刻存下
+   * 的半个回答会作为事实被注入之后的每个回合。
+   */
+  const turnBuffers = new Map();
+  const writtenTurns = new Set();
+  const writtenOrder = [];
+
+  ctx.on("session/event", (session, event) => {
+    try {
+      observeTurn(session, event);
+    } catch (error) {
+      // 会抛错的监听器会把 host 的事件循环一起拖下水。
+      ctx.logger?.warn?.(
+        `dsh-waifu-agents: 观察会话事件失败：${error?.message ?? error}`,
+      );
+    }
+  });
+
+  function observeTurn(session, event) {
+    const type = oneLine(event?.type);
+    const sessionId = oneLine(session?.id);
+    if (type === "" || sessionId === "") return;
+    const data = event?.data ?? {};
+    const turn = Number.isFinite(data.turn) ? data.turn : -1;
+    if (turn < 0) return;
+    const key = `${sessionId}\u0000${turn}`;
+    if (type === "turn/start") {
+      turnBuffers.set(key, { text: "", interrupted: false });
+      /*
+       * 在本回合的请求被构建之前重申闸门。
+       *
+       * `turn/start` 在组装提示词与工具列表的那一步之前被追加（
+       * `dsh-agent-loop` 的 `turn()` 先追加它，再循环 `preStep`），而这个
+       * 监听器同步跑在那次追加里——所以自上次调和之后变化过的绑定仍然来得及。
+       * 调和是幂等的，状态已匹配时什么也不做（不发 `tools/change`），这正是
+       * 每个回合的常态。
+       */
+      toolFilter?.reconcileFor(sessionId);
+      return;
+    }
+    if (type === "assistant/message") {
+      const buffer = turnBuffers.get(key) ?? { text: "", interrupted: false };
+      if (data.interrupted === true) buffer.interrupted = true;
+      const text = textOfMessage(data.message);
+      if (text !== "")
+        buffer.text = buffer.text === "" ? text : `${buffer.text}\n${text}`;
+      turnBuffers.set(key, buffer);
+      return;
+    }
+    if (type !== "turn/end") return;
+    const buffer = turnBuffers.get(key);
+    turnBuffers.delete(key);
+    /* `reason.kind` 就是全部裁决。缺了 reason 不代表"大概
+       没事"：未知的结局恰恰是绝不能写下去的那种情况。 */
+    if (oneLine(data.reason?.kind) !== "completed") return;
+    if (buffer === undefined || buffer.interrupted === true) return;
+    if (buffer.text.trim() === "") return;
+    if (writtenTurns.has(key)) return;
+    rememberTurnKey(key);
+    void rememberTurn(sessionId, buffer.text, session).catch((error) => {
+      ctx.logger?.warn?.(
+        `dsh-waifu-agents: 写入长期记忆失败：${error?.message ?? error}`,
+      );
+    });
+  }
+
+  /** 已写回合的有界备忘，重复事件因此是空操作。 */
+  function rememberTurnKey(key) {
+    writtenTurns.add(key);
+    writtenOrder.push(key);
+    while (writtenOrder.length > 200) writtenTurns.delete(writtenOrder.shift());
+  }
+
+  /** 用户实际看到的文本，仅此而已。 */
+  function textOfMessage(message) {
+    const blocks = Array.isArray(message?.content) ? message.content : [];
+    const parts = [];
+    for (const block of blocks) {
+      // `reasoning` 与工具块不是她说的话。只有文本算数。
+      if (block?.type !== "text") continue;
+      const text = typeof block.text === "string" ? block.text : "";
+      if (text !== "") parts.push(text);
+    }
+    return parts.join("\n").trim();
+  }
+
+  /**
+   * 把一个完成的回合写进真正说了它的人名下。
+   *
+   * 团队房间：按发言者拆分回复——转写携带的渲染形式 `名字：台词`，或某个
+   * run 死在渲染之前的 `〔名字〕` 协议——每个成员得到她自己的台词，没人继承
+   * 别人的。单人声音：整份回复属于正在送达的人设，且仅当这个人设可被证明。
+   */
+  async function rememberTurn(sessionId, text, session) {
+    const snapshot = memorySnapOf() ?? (await refreshMemorySnapshot());
+    const roster = listFiles();
+    const teamState = teamRuntime?.stateOf?.(sessionId);
+    const teamMode = oneLine(teamState?.mode) === "team";
+    /*
+     * 工作模式的回合不写角色记忆，除非面板上明确打开了「工作模式也记」。
+     *
+     * 干活时的回复里，被 `pickSentence` 选中的「最长的一句」几乎总是代码、
+     * 命令或一句总结——那不是她的经历。真机里已经因此存进过整行 SQL
+     * （`feed_area`（区域，含 `shed_id`…）和工具调用协议残片；这两样都会在
+     * 之后命中查询词时被当作「她记得的事」注入回去。
+     *
+     * 团队不在这条规则里：团队本来就是聊天（零工具），走的是上面那一支。
+     */
+    if (!teamMode && snapshot.config?.captureToolTurns !== true) {
+      const modeNow = resolveMode({ session: sessionModeOf(sessionId), global: currentMode });
+      if (modeNow !== "chat") return;
+    }
+    const plan = teamMode
+      ? splitBySpeaker(text, roster, {
+          team: oneLine(teamState?.team),
+          session: sessionId,
+        })
+      : soloPlan(sessionId, text, session, roster);
+    for (const item of plan) {
+      // 被关掉的人设既不读也不积累。把全局开关关掉必须同时停住写入，
+      // 否则"关"还会继续养大用户要求冻结的文件。
+      if (!effectiveEnabled(snapshot.config, item.id)) continue;
+      const store =
+        snapshot.stores.get(item.id) ??
+        (await readStore(personaMemoryDir, item.id));
+      const limit = personaConfigOf(snapshot.config, item.id).maxEntries;
+      const screen = screenEntry(store.entries, item.text);
+      if (screen.ok !== true) continue;
+      const next = appendEntry(
+        store,
+        { text: screen.text ?? item.text, source: item.source },
+        limit,
+      );
+      await writeStore(personaMemoryDir, next.store);
+      snapshot.stores.set(item.id, next.store);
+    }
+  }
+
+  /**
+   * 写入者的单人声音那一半。
+   *
+   * 与注入路径共用同一道闸门，刻意的。无法证明的归属直接跳过而不是猜：把
+   * 一句台词记到错误的主名下，是面板无法撤销的那一种错误，因为等到有人
+   * 发现时，那个人设已经在她服务的每个会话里回忆它了。
+   *
+   * `hasPersonaRow` 是闸门的另一半，它不是冗余。`expectsPersona` 对锚从未被
+   * 投影的会话答 `true`——空锚是"未知"，不是"普通预设"——而默认那一档
+   * 能说出一个不属于任何人设文件的 id。没有这道检查，跑平台预设的会话最终
+   * 会得到 `persona-memory/code.json`：一份没有人要的记忆，在面板里列成一
+   * 行来历用户既看不见也删不掉的记录。
+   */
+  function soloPlan(sessionId, text, session, roster) {
+    const mountedId = shownPresetOf(session);
+    if (!expectsPersona(sessionId, mountedId)) return [];
+    const id = currentPersonaIdOf(sessionId, session);
+    if (id === "" || !hasPersonaRow(id)) return [];
+    const sentence = pickSentence(text);
+    /*
+     * 一句以「名字：」开头的台词，不是单人回合该记的东西。
+     *
+     * 它意味着这一轮的回复其实是**团队**的分段文本，而 `stateOf` 没认出来
+     * （10-29 那次团队没退队的现场）：把 `托尔：（…）` 记到达克妮斯名下，
+     * 是一份面板上无法追溯、却会被她每个会话召回的假记忆。团队路径里
+     * 「认不出是谁说的宁可跳过」那条规则只在 team 分支生效，这里补上对应
+     * 的一半 —— 归属证明不了，就不记。
+     */
+    if (speakerPrefixOf(sentence, roster) !== null) return [];
+    return [
+      {
+        id,
+        text: sentence,
+        source: { kind: "solo", session: sessionId },
+      },
+    ];
+  }
+
+  /**
+   * 这一行开头是不是名册里某位在说话。
+   *
+   * 只认 `名字：` / `名字:` 两种写法，且要求名字**就是**一个已注册人设：
+   * 单人口吻里出现一个不认识的「某某：」更可能是台词本身，不能凭这个丢。
+   * @param {string} text
+   * @param {ReadonlyArray<{name?: string}>} roster
+   * @returns {string | null}
+   */
+  function speakerPrefixOf(text, roster) {
+    const line = oneLine(text);
+    if (line === "") return null;
+    for (const row of Array.isArray(roster) ? roster : []) {
+      const name = oneLine(row?.name);
+      if (name === "") continue;
+      if (line.startsWith(`${name}：`) || line.startsWith(`${name}:`)) return name;
+    }
+    return null;
+  }
+
+  // 注册表经由设置文档写 `selectedDefault`，所以这是让同步缓存保持诚实的
+  // 唯一信号。
   ctx.on("settings/document-updated", (namespace) => {
     if (namespace === REGISTRY_NS) void refreshDefault();
   });
   void refreshDefault();
 
   /**
-   * The shadow for a session whose composition carries no persona row at all
-   * (profile default `cordis`, say): the placeholder is not in that prompt, so
-   * give that one agent a nearer section of its own. The disposer rides the
-   * agent's scope, and `/waifu-reset` removes it early when nothing is left to
-   * follow.
+   * 给组合里完全没有携带人设行的会话（比如 profile 默认 `cordis`）准备的
+   * 影子：占位符不在那份提示词里，所以给那一个 agent 单独挂一段更近的。注销
+   * 器搭在 agent 作用域上，`/waifu-reset` 在没有可跟随的东西时提前移除它。
    */
   const shadows = new Map();
 
@@ -2455,19 +2757,17 @@ export function apply(ctx, config = {}) {
     try {
       dispose();
     } catch {
-      // The agent's scope may already be gone; its effect went with it.
+      // agent 的作用域可能已经不在了；它的 effect 随之而去。
     }
   }
 
   /**
-   * Does this session's composition carry one of our persona rows?
+   * 这个会话的组合里有没有带着我们的人设行之一？
    *
-   * `owned` answers for every preset this plugin registered; a file on disk
-   * covers a preset id that a persona file carries but that was never
-   * registered. What this must **not** do is parse the file and assemble the
-   * text — it is called from `personaExpected`, which sits on the unconditional
-   * per-step variable path, and the only question being asked is whether a row
-   * exists at all.
+   * `owned` 覆盖本插件注册的每个预设；盘上的文件覆盖人设文件带着却从未被
+   * 注册的预设 id。这件事 **绝不能** 做的是解析文件并组装文本——它被
+   * `personaExpected` 调用，而后者坐在无条件的每步变量路径上，被问到的唯一
+   * 问题只是有没有这么一行。
    */
   function hasPersonaRow(mountedId) {
     const id = oneLine(mountedId);
@@ -2504,16 +2804,15 @@ export function apply(ctx, config = {}) {
         skeletonFor(parsed.meta, skeleton) === null ? null : skeleton.text,
       );
       /*
-       * `registering` counts as owned: the preset is still this plugin's, it is
-       * merely between two halves of a re-registration (see the declaration).
-       * Reporting it as unowned turns our own churn into a conflict warning.
-       * Before the first scan settles there is no verdict at all, so the answer
-       * is "yes, ours" rather than "no" — see `scannedOnce`.
+       * `registering` 算作 owned：预设仍是本插件的，只是正处于重新注册的两半
+       * 之间（见声明处）。把它报成无主，等于把我们自己的反复变成冲突警告。
+       * 第一次扫描尘埃落定之前没有任何裁决，所以答案是"是，我们的"而不是
+       * "不是"——见 `scannedOnce`。
        */
       const mine = scannedOnce !== true || owned.has(id) || registering.has(id);
-      /* Whether a REAL conflict was observed: only `scan` can know that. */
+      /* 是否真的观察到过冲突：只有 `scan` 能知道。 */
       const isForeign = foreign.has(id);
-      /* Whether the occupier is provably a previous instance of this plugin. */
+      /* 占用者是否可证明是本插件的上一个实例。 */
       const isGhost = ghosts.has(id);
       out.push({
         id,
@@ -2530,10 +2829,9 @@ export function apply(ctx, config = {}) {
         foreign: isForeign,
         ghost: isGhost,
         /*
-         * The same three flags, resolved to one word by the shared truth table.
-         * Shipped alongside them rather than instead of them: the panel words
-         * its badge from `state`, while `foreign`/`ghost` stay readable for
-         * anything that wants the raw evidence (and for older panels).
+         * 同样三个标志位，由共享真值表归并成一个词。随它们一起发布而不是
+         * 取而代之：面板从 `state` 取徽章的措辞，而 `foreign`/`ghost` 保持
+         * 可读，给任何想要原始证据的东西（以及旧面板）。
          */
         state: registrationState({ owned: mine, foreign: isForeign, ghost: isGhost }),
         mtimeMs: parsed.mtimeMs,
@@ -2546,36 +2844,40 @@ export function apply(ctx, config = {}) {
   }
 
   /**
-   * Team mode, wired to this plugin's own seams.
+   * 团队模式，接到本插件自己的接缝上。
    *
-   * `team-runtime.js` owns everything team-shaped; what it cannot know is where
-   * this install keeps its files, who a session currently is, and how this
-   * plugin reads its own directory. Those four answers are the whole of the
-   * coupling — everything else crosses as plain data, so `team.js` stays a leaf
-   * and the runtime is testable without a host.
+   * `team-runtime.js` 拥有一切团队形状的东西；它无从知道的是这份安装把文件
+   * 放在哪里、一个会话此刻是谁、以及本插件怎么读自己的目录。那四个答案就是
+   * 耦合的全部——其余一切都以普通数据穿过，于是 `team.js` 保持为叶子，
+   * 运行时不需要 host 也能测试。
    */
   teamRuntime = installTeamRuntime(ctx, {
     storeFile: path.join(path.dirname(overrideFile), TEAM_FILE),
     /*
-     * The ledger sits beside `teams.json` — the same directory the user already
-     * owns for this plugin, so a backup or a clean-up does not have to know
-     * about a second location.
+     * 账本放在 `teams.json` 旁边——用户已经为本插件拥有的同一个目录，备份或
+     * 清理不必知道第二个位置。
      */
     runLogFile: path.join(path.dirname(overrideFile), RUN_LOG_FILE),
     /*
-     * Team memory lives beside them too: one JSON file per session, owned by
-     * this plugin, wiped by the panel's clear op. A falsy value would disable
-     * memory entirely — reserved for hosts without a home directory.
+     * 团队记忆也住在它们旁边：每会话一个 JSON 文件，归本插件所有，由面板的
+     * 清除 op 抹掉。假值会彻底关闭记忆——留给没有主目录的 host。
      */
     memoryDir: path.join(path.dirname(overrideFile), "team-memory"),
     roster: listFiles,
     personaTextOf: safeText,
     /*
-     * Team mode asks for the body only. The runtime prefers this over
-     * `personaTextOf` when it exists, so a host that does not provide it still
-     * works (it just pays the old per-member skeleton).
+     * 团队模式只要正文。运行时在这个钩子存在时优先于 `personaTextOf` 使用
+     * 它，所以不提供它的 host 仍然能跑（只是付旧的每人骨架成本）。
      */
     personaBodyOf: personaBody,
+    /*
+     * 房间的长期记忆，由调用者按成员解析。
+     *
+     * 运行时拥有块放在哪里（任务之前，与剧情记忆同在一条 user 消息里）；
+     * 这一边拥有谁记得什么，因为开关、作用域和文件全都住在这里。假值答案
+     * 只意味着"没人有相关的东西"，必须根本不产出块。
+     */
+    personaMemoryOf: (input) => personaMemoryForTeam(input),
     coordinatorOf: (agent) => {
       const sessionId = oneLine(agent?.session?.id);
       if (sessionId === "") return null;
@@ -2584,22 +2886,46 @@ export function apply(ctx, config = {}) {
       return { id: found.id, name: found.name ?? found.id };
     },
     /*
-     * Which team this session was BORN on — the team preset it was created
-     * with, if any. This is the default half of the pairing: the preset decides
-     * what a session starts as, and `/waifu-team` is the override on top, in
-     * exactly the shape the global default persona and `/waifu-change` already
-     * have.
+     * 这个会话出生在哪个团队——创建它时用的团队预设（若有）。这是配对的
+     * 默认那一半：预设决定会话以什么开始，`/waifu-team` 是其上的覆盖，形状
+     * 与全局默认人设和 `/waifu-change` 已经有的完全相同。
      */
     teamForPreset: (agent) => teamNameForPreset(anchorOf(agent)),
     /*
-     * The chip move. `team-runtime` owns the binding, but the preset chip is
-     * the platform's — so it crosses as a callback, the same boundary as
-     * `liveAgentFor`. Best-effort: a team not registered as a preset (sync not
-     * finished, or registration failed) simply leaves the chip where it is.
+     * 「会话标签此刻停在哪」和「这个 id 是不是我们注册的人设」——团队绑定
+     * 靠这两个答案察觉用户绕过了本插件：宿主自己的预设选择器不经过我们任何
+     * 代码，`bound` 不会自己动，只有标签会。少了它们，在团队会话里换人之后
+     * 回答你的仍是原来那一队，还会把那一轮写进团队剧情记忆。
      */
-    moveChipToTeam: (agent, teamName) => {
-      const id = teamPresetIdByName(teamName);
-      return id !== "" && rememberTeamPreset(agent, id);
+    chipOf: (agent) => anchorOf(agent),
+    isPersonaPreset: (id) => owned.has(oneLine(id)),
+    /*
+     * chip 的移动。`team-runtime` 拥有绑定，但预设 chip 是平台的——所以它以
+     * 回调的形式穿过去，与 `liveAgentFor` 同一条边界。尽力而为：没被注册成
+     * 预设的团队（同步没跑完，或注册失败）只是让 chip 留在原处。
+     */
+    /*
+     * 把会话标签挪到团队预设上；挪不动就**如实返回 false**，由命令说出口。
+     *
+     * 挪不动只有两个原因：`teamPresets` 里没有这支队（注册那一轮还没跑完，
+     * 或者上一次注册被注册表拒了），或者平台拒绝了这次 `append`。前者可以
+     * 现场补一次同步再试——2026-10-29 那场正是这样：`/waifu-team` 绑上了、
+     * 托尔和康娜也真的在回答，标签却停在「达克妮斯」，而命令一个字都没提。
+     * 于是 `/waifu-current` 报「本会话人设：达克妮斯」，用户合理地以为自己
+     * 被换了人。
+     */
+    moveChipToTeam: async (agent, teamName) => {
+      const attempt = () => {
+        const id = teamPresetIdByName(teamName);
+        return id !== "" && rememberTeamPreset(agent, id);
+      };
+      if (attempt()) return true;
+      try {
+        await syncTeamPresets();
+      } catch {
+        /* 同步自己会记录失败原因；这里只关心还能不能再试一次。 */
+      }
+      return attempt();
     },
     serviceOf,
     liveAgentFor,
@@ -2607,2790 +2933,206 @@ export function apply(ctx, config = {}) {
   });
   ctx.on("dispose", () => teamRuntime?.dispose());
 
-  /* ------------------------------------------------- teams as real presets */
+  /* ---------------------------------------------------- 运行时工具闸门 */
 
   /**
-   * Every team is registered as an agent preset, which is what puts it on the
-   * new-session page next to the personas.
+   * 把闸门接到本插件自己的事实上，别无其他。
    *
-   * This is the same relationship a persona has to a session, and it is worth
-   * naming: picking a team when the session is CREATED is the default, and
-   * `/waifu-team` is the per-session override on top of it — exactly how the
-   * global default persona and `/waifu-change` already relate. A team that only
-   * existed as a command would be the one thing on that page you cannot choose.
+   * 规则是上面的 `shouldSealTools`（已导出，无 host 也可测试）。这里剩下的是
+   * 它对每个 agent 需要的三个答案：这个会话此刻是否在团队上、全局开关说
+   * 什么、以及服务它的是不是本插件。
    *
-   * Two maps, not one: `teamPresets` is id -> team name (how a running session
-   * is recognised), `teamOwned` is id -> what was registered (how it is taken
-   * back). A session's own preset id is the only thing `anchorOf` can read, so
-   * without the first map there is no way to know a session was born on a team.
-   *
-   * Both live in `REG_STATE`, shared across every live apply() of this plugin,
-   * for the same reason `owned` does: a twin instance that cannot see the other
-   * one's registrations either re-registers them (the registry refuses the
-   * duplicate and the team silently ends up with no preset at all) or — worse —
-   * treats them as unknown and tears them down. The host re-applies this plugin
-   * during install and reload, so the window is real.
+   * 其余一切——怎么封、怎么解、对每回合复查的幂等、host 没有 `ctx.tools`
+   * 时怎么办——都住在 `tool-filter.js`，于是可以离线演练。
    */
-  const teamPresets = REG_STATE.teamPresets;
-  const teamOwned = REG_STATE.teamOwned;
-
-  /**
-   * Identity of THIS apply(), stamped onto every team row it writes.
-   *
-   * Sharing the map removes the blindness but not the ownership question: with
-   * one map there are two instances' rows in it, and 「delete the row for this
-   * id」 stops being a safe operation unless the row is provably mine. A fresh
-   * object per apply() is enough — reference equality against `entry.applied`
-   * answers 「did I write this row?」, and nothing else needs to be stored.
-   */
-  const teamToken = {};
-
-  /** The team a session was born on, or `null`. */
-  function teamNameForPreset(presetId) {
-    const found = teamPresets.get(oneLine(presetId));
-    return typeof found === "string" ? found : null;
-  }
-
-  /**
-   * The preset id for one team name.
-   *
-   * A team name is whatever the user typed — spaces, punctuation, anything —
-   * while a preset id has to satisfy {@link ID_OK}. So the id is derived, and
-   * derived ids can collide (「素晴 三人」 and 「素晴三人」 both flatten to the same
-   * string), which is what the `taken` set and the numeric suffix are for.
-   * @param {string} name
-   * @param {Set<string>} taken ids already claimed in this pass
-   */
-  function teamPresetIdFor(name, taken) {
-    const flat = `${TEAM_PRESET_PREFIX}${oneLine(name).replace(/\s+/gu, "-")}`;
-    // Drop what a preset id cannot carry. The `a` prefix is the trick: `ID_OK`
-    // refuses a leading `-`, so testing the candidate on its own would throw
-    // away every hyphen, but `a-` is a legal id — which is exactly the answer
-    // wanted for a character that is legal everywhere except the front.
-    const kept = [...flat].filter((ch) => ID_OK.test(`a${ch}`)).join("");
-    const base = ID_OK.test(kept) ? kept : `${TEAM_PRESET_PREFIX}team`;
-    if (!taken.has(base)) return base;
-    for (let n = 2; n < 1000; n += 1) {
-      const candidate = `${base}-${n}`;
-      if (!taken.has(candidate)) return candidate;
-    }
-    return `${base}-${Date.now()}`;
-  }
-
-  /** The registered preset id for a team name, or `""` when it is not one. */
-  function teamPresetIdByName(name) {
-    const wanted = oneLine(name);
-    if (wanted === "") return "";
-    for (const [id, held] of teamPresets) {
-      if (held === wanted) return id;
-    }
-    return "";
-  }
-
-  /**
-   * Move the session chip onto a TEAM preset.
-   *
-   * Same append as {@link rememberSessionPreset}, but the guard differs: a
-   * persona id must be in `owned`, while a team id must be in `teamPresets`
-   * (the registry's team half). Without this split `/waifu-team` could never
-   * move the chip — team ids are not personas.
-   */
-  function rememberTeamPreset(agent, id) {
-    if (config.syncSessionChip === false) return false;
-    const session = agent?.session;
-    if (session === undefined || session === null) return false;
-    if (id === "" || !teamPresets.has(id)) return false;
-    try {
-      session.append("agent-preset/selected", { agentPreset: id });
-      return true;
-    } catch (error) {
-      ctx.logger?.warn?.(
-        `dsh-waifu-agents: 会话标签没跟上（团队 ${id}）：${error?.message ?? error}`,
-      );
-      return false;
-    }
-  }
-
-  /**
-   * Bring the registered team presets in line with `teams.json`.
-   *
-   * Called after every write, and once at install: a team that exists only in
-   * the file cannot be chosen when a session is created, which is the whole
-   * point of registering it. Re-registration is keyed on the description
-   * because that carries the member list — a team that gained a member has to
-   * be re-registered or the new-session page keeps advertising the old line-up.
-   *
-   * Never throws: a team that cannot be registered is a team you can still
-   * reach with `/waifu-team`, and failing the write that created it would be a
-   * worse answer than warning.
-   */
-  /**
-   * Take one team row down: bookkeeping first, then the registration.
-   *
-   * Both halves move together on purpose. The id -> name mapping is what
-   * `/waifu-team` and the default-preset row read, so a mapping that outlives
-   * its registration sends them to a preset the registry no longer has — the
-   * failure looks like 「那个团队不存在了」 on a team the user can see in the
-   * list. The mapping is only dropped when it still describes THIS row
-   * (`=== entry.name`): a twin may have replaced both halves already, and
-   * erasing its mapping would be the same mistake in the other direction.
-   *
-   * A failed disposal puts the row back. The registration is still alive on the
-   * platform side when `dispose` throws, and a row nobody can see is a row no
-   * later pass can retry: the next attempt would register over it, hit
-   * `Duplicate agent preset`, and warn forever without ever recovering.
-   *
-   * @param {string} id
-   * @param {{ dispose: () => Promise<unknown>, name: string }} entry
-   * @returns {Promise<boolean>} whether the registration is gone
-   */
-  async function detachTeamRow(id, entry) {
-    /*
-     * Delete only if the ledger still holds EXACTLY this row.
-     *
-     * Today every pass runs through the shared `teamSyncs` chain, so no other
-     * pass can write between the caller's read and this delete — the condition
-     * is unreachable, and that is precisely why it is written down: the
-     * unconditional delete was safe only because of a guarantee made forty
-     * lines away. A future caller that reaches `runTeamPresetSync` off the
-     * chain, or a dispose hook that lands here, would otherwise delete a
-     * twin's row and take its name mapping with it — one instance erasing the
-     * live registration of another.
-     */
-    if (teamOwned.get(id) === entry) teamOwned.delete(id);
-    try {
-      await entry.dispose();
-    } catch (error) {
-      // Put the row back and leave the name mapping untouched: a disposal that
-      // failed leaves the registration alive on the platform side, so the
-      // mapping is still the truth. A row nobody can see is a row no later pass
-      // can retry — the next attempt would register over it, hit
-      // `Duplicate agent preset`, and warn forever without ever recovering.
-      //
-      // Only restore if no other instance claimed the id while we were
-      // disposing; writing over a live twin's row would hide it from the
-      // instance that can actually use it.
-      if (!teamOwned.has(id)) teamOwned.set(id, entry);
-      ctx.logger?.warn?.(
-        `dsh-waifu-agents: 卸下团队预设「${entry.name}」失败：${error?.message ?? error}`,
-      );
-      return false;
-    }
-    /*
-     * The registration is gone, so the mapping has to go with it — but only if
-     * nobody replaced the row in the meantime. A twin registering the same
-     * team writes the same name, so the name is not enough to tell whose
-     * mapping this is; the empty ledger is.
-     */
-    if (!teamOwned.has(id) && teamPresets.get(id) === entry.name) teamPresets.delete(id);
-    return true;
-  }
-
-  async function runTeamPresetSync() {
-    if (teamRuntime === null) return;
-    const store = teamRuntime.store();
-    const wanted = new Map();
-    const taken = new Set();
-    for (const team of store.teams) {
-      const id = teamPresetIdFor(team.name, taken);
-      taken.add(id);
-      const preview = teamRuntime.preview(team.name);
-      const members =
-        preview.ok === true ? (preview.members ?? []).map((row) => row.name) : [];
-      const description =
-        members.length === 0
-          ? "团队模式 · 这一队现在解析不出成员。"
-          : `团队模式 · ${members.length} 人：${members.join("、")}`;
-      wanted.set(id, { name: team.name, description });
-    }
-    /*
-     * Retire the rows this apply() wrote and no longer wants.
-     *
-     * `entry.applied !== teamToken` is the whole point of the shared map: a row
-     * belonging to a twin instance must NOT be torn down here. That instance is
-     * still running and still considers the preset live; deleting its row drops
-     * its name mapping too, and its own sync would then re-register onto an id
-     * it had already given up. Only the instance that wrote a row may retire
-     * it — and if it dies without doing so, its dispose hook retires it then.
-     */
-    for (const [id, entry] of [...teamOwned]) {
-      if (entry.applied !== teamToken) continue;
-      const want = wanted.get(id);
-      if (want !== undefined && want.name === entry.name && want.description === entry.description) continue;
-      await detachTeamRow(id, entry);
-    }
-    let at = 0;
-    for (const [id, want] of wanted) {
-      at += 1;
-      const held = teamOwned.get(id);
-      if (
-        held !== undefined &&
-        held.applied === teamToken &&
-        held.name === want.name &&
-        held.description === want.description
-      )
-        continue;
+  toolFilter = createToolFilter({
+    decide: (agent) => {
+      const sessionId = oneLine(agent?.session?.id);
+      if (sessionId === "") return { seal: false, why: "这个 agent 没有会话 id" };
+      const teamMode =
+        oneLine(teamRuntime?.stateOf?.(sessionId)?.mode) === "team";
       /*
-       * A row written by another instance — or a stale row of our own, or a row
-       * whose text changed — cannot be adopted. Its disposer belongs to a
-       * registration that dies with the fiber that made it, so reusing it would
-       * leave this instance holding a corpse and the team unpickable until the
-       * next restart. Take it down and register afresh, exactly as the persona
-       * half does in `scanOnce`.
+       * "在服务"意味着三件事之一，最后一档刻意不是 `currentPersonaIdOf`：
+       * 它会退回全局默认人设，于是对 profile 里的每个会话都答"是她"
+       * ——包括从没见过人设的那些。
        *
-       * Sharing the ledger is how this instance KNOWS there is a row. It is not
-       * permission to skip the registration.
+       *   shadows.has(...)      我们把人设挂在了自有预设不带人设行的会话上
+       *   overrideOf(...) !== "" 会话被手动指到了一个人设
+       *   hasPersonaRow(anchor) 它运行的预设就是我们的人设行之一
        */
-      if (held !== undefined && !(await detachTeamRow(id, held))) continue;
-      try {
-        // The body is only validated, never served: the preset row is a
-        // placeholder and `resolvePersonaText` returns `""` for a team preset
-        // (a discussion builds its own request). So no persona text reaches
-        // the model through this preset at all — the team prompt does.
-        const definition = buildDefinition(
-          id,
-          { name: want.name, description: want.description, order: at },
-          `你与「${want.name}」这一队一起工作。`,
-          // Chat rows, always: team mode is chat mode regardless of the switch.
-          templateRowsFor("team"),
-          null,
-          TEAM_ORDER_BASE,
-        );
-        const dispose = await ctx.agentPresets.register(definition);
-        /*
-         * Two jobs, same shape as the persona half. Retire the row when this
-         * fiber dies, and only when the ledger still holds THIS registration:
-         * a twin may have replaced it since, and this instance dying must not
-         * erase the replacement's record or its name mapping.
-         */
-        ctx.on("dispose", () => {
-          const current = teamOwned.get(id);
-          if (current !== undefined && current.dispose === dispose) {
-            teamOwned.delete(id);
-            if (teamPresets.get(id) === want.name) teamPresets.delete(id);
-          }
-          return dispose();
-        });
-        teamOwned.set(id, { dispose, applied: teamToken, ...want });
-        teamPresets.set(id, want.name);
-      } catch (error) {
-        ctx.logger?.warn?.(
-          `dsh-waifu-agents: 团队「${want.name}」没能注册成预设（还能用 /waifu-team 选它）：${error?.message ?? error}`,
-        );
-      }
-    }
-  }
-
-  /*
-   * Serialized, because it is called from a `void` at install AND awaited by
-   * every `teamSet` write — so a write that lands while the install-time pass
-   * is still walking the store runs two passes at once. Two passes interleave
-   * as "register an id the other one is registering", the registry refuses the
-   * duplicate, and the team silently ends up with no preset at all.
-   *
-   * The chain lives in `REG_STATE` for the same reason the books do: a reload
-   * leaves the previous instance's `void syncTeamPresets()` in flight, and an
-   * instance-local chain would let the new instance run its pass alongside it.
-   * Sharing the map without sharing the chain would be worse than neither —
-   * two passes reading one ledger, both deciding the other's rows are stale.
-   *
-   * Chained rather than dropped: a pass skipped because one is in flight would
-   * miss the team the caller just wrote.
-   */
-  function syncTeamPresets() {
-    REG_STATE.teamSyncs = REG_STATE.teamSyncs.then(
-      () => runTeamPresetSync(),
-      () => runTeamPresetSync(),
-    );
-    return REG_STATE.teamSyncs;
-  }
-
-  /*
-   * Not awaited: `apply` must not block on the registry, and a team that fails
-   * to register is still reachable through `/waifu-team`. What must not happen
-   * is an unhandled rejection, so the failure is logged here rather than
-   * swallowed by `void`.
-   */
-  void syncTeamPresets().catch((error) => {
-    ctx.logger?.warn?.(`dsh-waifu-agents: 同步团队预设失败：${error?.message ?? error}`);
+      const ours =
+        teamMode ||
+        shadows.has(sessionId) ||
+        oneLine(overrideOf(sessionId)) !== "" ||
+        hasPersonaRow(anchorOf(agent));
+      /*
+       * 模式按会话解析，不直接读全局开关：`/waifu-mode here chat` 钉住的
+       * 那一场要能不跟着全局走，否则这个命令就没有存在的理由。`resolveMode`
+       * 里空串＝跟随全局，别在这里手写 `||`——那样「没有覆盖」和「显式
+       * tools」会被合并成同一个值。
+       */
+      const why = shouldSealTools({
+        teamMode,
+        mode: resolveMode({ session: sessionModeOf(sessionId), global: currentMode }),
+        ours,
+      });
+      return { seal: why !== "", why: why === "" ? "这个会话不封" : why };
+    },
+    listAgents: liveAgents,
+    logger: ctx.logger,
   });
 
-  /** Highest order in the directory plus one — the panel never asks for it. */
-  function nextOrder() {
-    let max = 0;
-    for (const item of listFiles()) {
-      if (typeof item.order === "number" && item.order > max) max = item.order;
-    }
-    return max + 1;
-  }
-
-  /**
-   * The file name a display name gets: the name slugified, kept unique against
-   * every other file in the directory.
-   *
-   * The id is invisible, so this is the only thing holding "file name, `name`
-   * field, row title" together as one thing. `self` is the file being saved:
-   * without it, saving an unchanged name would collide with its own file and
-   * land on `name-2` — which is exactly how a no-op edit used to fork a wife in
-   * two. Unicode survives verbatim, so `后藤一里` is the name *and* the file
-   * name; only what a file name cannot carry (spaces, `/`, punctuation) folds
-   * to `-`, and a name that folds away to nothing falls back to `persona`, then
-   * `persona-2`, `persona-3`…
-   * @param {string} name display name
-   * @param {string | null} [self] the id that currently holds this wife, if any
-   * @returns {string} a legal, currently free id
-   */
-  function idForName(name, self = null) {
-    const slug = oneLine(name)
-      .toLowerCase()
-      .replace(/[^\p{L}\p{N}]+/gu, "-")
-      .replace(/^-+|-+$/g, "")
-      .slice(0, 40);
-    const taken = new Set(listFiles().map((item) => item.id));
-    if (self !== null) taken.delete(self);
-    const base = ID_OK.test(slug) ? slug : "persona";
-    if (!taken.has(base)) return base;
-    for (let n = 2; n < 1000; n += 1) {
-      const candidate = `${base}-${n}`;
-      if (!taken.has(candidate)) return candidate;
-    }
-    return `${base}-${Date.now()}`;
-  }
-
-  async function unregister(id) {
-    const entry = owned.get(id);
-    if (entry === undefined) return false;
-    owned.delete(id);
-    await entry.dispose();
-    return true;
-  }
-
-  /**
-   * Assemble, then register. Validation lives HERE rather than in each caller so
-   * that no path — panel, command, or scan — can register a body the prompt
-   * renderer would choke on.
-   */
-  async function registerOne(id, meta, body) {
-    const templateIssue = templateProblem(meta);
-    if (templateIssue !== null) throw new Error(templateIssue);
-    const skeleton = skeletonFor(meta, readSkeleton());
-    const name = oneLine(meta.name) || id;
-    const poured = assemble(
-      name,
-      body,
-      skeleton === null ? null : skeleton.text,
-    );
-    if (!poured.ok) throw new Error(poured.problems.join("；"));
-    const platformDispose = await ctx.agentPresets.register(
-      buildDefinition(id, meta, body, templateRowsFor("persona"), skeleton),
-    );
-    /*
-     * At most ONE call ever reaches `platformDispose`.
-     *
-     * Two callers can want this registration gone: this instance's fiber dying,
-     * and `unregister` while a newer instance takes the row over. The
-     * platform's disposer removes the preset BY ID and has no idea which
-     * registration it is removing, so a second call landing after the taker's
-     * `register` would delete the TAKER's preset — the exact way a dead
-     * instance could reach across and empty a live one.
-     *
-     * Single-flight covers the timing hole identity checking cannot: between
-     * `unregister` deleting the row and `registerOne` writing the replacement,
-     * the ledger is empty, so a hook firing in that window sees no owner to
-     * compare against and would otherwise dispose blind.
-     *
-     * Retryable by design: a throw clears the slot so the next attempt can try
-     * again, which is what keeps a temporarily failing disposal from silently
-     * orphaning a registration.
-     */
-    let retirement = null;
-    const retire = () => {
-      if (retirement === null) {
-        retirement = (async () => platformDispose())();
-        retirement.catch(() => {
-          retirement = null;
-        });
-      }
-      return retirement;
-    };
-    /*
-     * Two jobs in one hook. The obvious one unregisters the preset when THIS
-     * instance's fiber dies. The shared-bookkeeping one removes OUR entry from
-     * `REG_STATE.owned` — and only ours: a twin instance may have replaced the
-     * row since (its disposer sits in the map instead), and this instance
-     * dying must not erase the replacement's record. Without this cleanup the
-     * surviving twin would keep skipping an id whose registration just
-     * vanished with the dead fiber, and every session would answer with the
-     * platform fallback until a manual refresh.
-     *
-     * The replacement case must not dispose AT ALL. Taking the row over runs
-     * this instance's disposer on the way (see `unregister`), so a second call
-     * here is not a harmless repeat — it is a delete against whatever now holds
-     * the id. Identity is the whole guard; `retire` is the backstop for the
-     * window where the row is momentarily gone.
-     *
-     * ORDER IS THE CONTRACT with `unregister`: it deletes the row FIRST, then
-     * awaits the disposer, so an explicit teardown always arrives here with
-     * `current === undefined` and still disposes. Move that `delete` after an
-     * await and this hook starts seeing its own row, taking the
-     * `current.dispose === retire` branch — still correct. Move it after the
-     * AWAIT ITSELF and a rename/update would leave the registration alive with
-     * nothing on the book.
-     */
-    ctx.on("dispose", () => {
-      const current = owned.get(id);
-      if (current !== undefined && current.dispose !== retire) return undefined;
-      if (current !== undefined) owned.delete(id);
-      return retire();
-    });
-    owned.set(id, {
-      dispose: retire,
-      rev: registrationRev(skeleton, body, currentMode),
-      applied: instToken,
-      epoch: instEpoch,
-    });
-  }
-
-  /**
-   * Is the occupier of this id provably this plugin?
-   *
-   * Written after reading the platform source (`dsh-agent-preset-registry`),
-   * which killed the previous reclaim design twice over:
-   *
-   *  - `list()` rows carry only `id/name/description/order/broken` — the
-   *    registered `plugins` array is NOT exposed, so a roster-row fingerprint
-   *    could never fire;
-   *  - `register()` throws `Duplicate agent preset` on an occupied id — it
-   *    never upserts, and the ghost's disposer is held by the dead previous
-   *    instance. There is no remove-by-id API, so there is nothing to
-   *    re-register over: the only cure for a ghost is a restart.
-   *
-   * The one readable fingerprint is `readDocument(id)`, the composition YAML
-   * behind the declaration: our definitions embed the persona plugin row
-   * (`@deepseek-ai/dsh-persona`) rewritten with `PERSONA_PLACEHOLDER` as the
-   * prefix — a combination nothing else registers. Feature-detected: the
-   * service surface is not contractually promised to expose it.
-   *
-   * The text comes from `documentText()`, which accepts both the wrapper object
-   * the service actually resolves with and a plain string. Reading only the
-   * string shape is what made this check dead code for a whole release: the
-   * fingerprint never matched, so `ghost` was unreachable and every leftover
-   * was reported as an unknown occupier.
-   *
-   * The occupier this identifies can be a DEAD instance (hot-reload ghost) or
-   * a LIVE twin (the host re-applies the plugin during install/reload, and
-   * both instances exist for a while). The shared `REG_STATE.owned` normally
-   * lets twins cooperate before any accusation, so reaching this check means
-   * the occupier predates the shared bookkeeping either way — the remedy is
-   * the same: a restart leaves exactly one instance holding the id.
-   *
-   * @param {string} id
-   * @returns {Promise<string | null>} the panel note when provably ours, else null
-   */
-  async function ownGhostNote(id) {
-    try {
-      if (typeof ctx.agentPresets?.readDocument !== "function") return null;
-      const text = documentText(await ctx.agentPresets.readDocument(id));
-      if (text === "") return null;
-      if (!text.includes("@deepseek-ai/dsh-persona")) return null;
-      if (!text.includes(PERSONA_PLACEHOLDER)) return null;
-      return "本插件另一个实例仍持有这个 id（热重载或升级期间新旧实例并存），当前实例接不过来；重启 DSH 后只保留一个实例，即可恢复";
-    } catch {
-      return null;
-    }
-  }
-
-  /**
-   * Register every file that is not already taken by this or another owner, and
-   * RE-register the ones whose text changed since they were registered.
-   *
-   * The second half is what makes 「刷新」 mean something after an edit: a scan
-   * that only adopts new files leaves an edited wife answering with her old text
-   * until the next restart, which is exactly the surprise the panel gets blamed
-   * for.
-   */
-  async function scanOnce() {
-    /*
-     * Recomputed, never accumulated: a conflict that was resolved by renaming
-     * the file has to stop being reported. `foreign` is the evidence the panel
-     * reads before it accuses a row of being taken by another owner, so a stale
-     * entry would be a lie that survives a fix.
-     */
-    foreign.clear();
-    ghosts.clear();
-    const roster = new Map();
-    try {
-      for (const preset of await ctx.agentPresets.list())
-        roster.set(preset.id, preset);
-    } catch (error) {
-      return {
-        added: [],
-        reloaded: [],
-        skipped: [],
-        problems: [`读不到名册：${error.message ?? error}`],
-      };
-    }
-    const added = [];
-    const reloaded = [];
-    const skipped = [];
-    const problems = [];
-    for (const item of listFiles()) {
-      if (!item.idOk) {
-        problems.push(
-          `${item.id}.md: 文件名不是合法的 preset id（只允许字母、数字、连字符，可以中文）`,
-        );
-        continue;
-      }
-      if (item.problems.length > 0) {
-        problems.push(`${item.id}.md: ${item.problems.join("；")}`);
-        continue;
-      }
-      const parsed = readPersona(fileFor(item.id));
-      if (!parsed.body) {
-        problems.push(`${item.id}.md: 正文是空的`);
-        continue;
-      }
-      const rev = registrationRev(
-        skeletonFor(parsed.meta, readSkeleton()),
-        parsed.body,
-        currentMode,
-      );
-      /*
-       * One guard for every branch below: an id mid-registration (by this scan
-       * earlier in the loop, by a concurrent op, or by a twin instance's scan —
-       * the holds live in the shared `registering` map) is ours by
-       * definition. Reading the gap as a conflict is how the panel ended up
-       * accusing a wife of stealing her own id.
-       */
-      if (registering.has(item.id)) continue;
-      const owner = owned.get(item.id);
-      if (owner !== undefined) {
-        const mine = owner.applied === instToken;
-        /*
-         * Three questions, three answers:
-         *
-         *  - mine, same text, roster agrees → nothing to do.
-         *  - someone NEWER wrote it → do not touch it. Taking the row here is
-         *    the ping-pong: two live instances each refresh, each sees a
-         *    foreign token, each re-registers, and the disposer changes hands
-         *    forever.
-         *  - mine and stale, or an OLDER instance's → rebuild. Rebuilding is
-         *    how a newer instance becomes the owner while the older one is
-         *    still alive, so that the older one's fiber dying later takes
-         *    nothing down with it.
-         *
-         * A row with no numeric `epoch` predates the ordering (an in-place
-         * upgrade kept the shared object). It is treated as older — the code
-         * that wrote it runs inside an instance that applied before us — and
-         * the takeover itself is still safe: `unregister` deletes only THIS id
-         * from the book, disposes only this id's registration, and leaves every
-         * other row alone.
-         */
-        if (mine && owner.rev === rev && roster.has(item.id)) continue;
-        if (!mine && typeof owner.epoch === "number" && owner.epoch >= instEpoch)
-          continue;
-        /*
-         * The rev check needs the roster's agreement. After a twin instance
-         * died, its per-id dispose hook deletes the shared record — but if a
-         * scan slipped between the registry row vanishing and that cleanup
-         * (or the dying fiber's disposal is still in flight), `owned` holds a
-         * row the registry no longer does. Skipping on rev alone would then
-         * leave the wife unregistered until a manual refresh; requiring the
-         * roster row turns that gap into an ordinary reload.
-         */
-        holdRegistration(item.id);
-        try {
-          await unregister(item.id);
-          await registerOne(item.id, parsed.meta, parsed.body);
-          reloaded.push(item.id);
-        } catch (error) {
-          problems.push(`${item.id}: ${error.message ?? error}`);
-        } finally {
-          releaseRegistration(item.id);
-        }
-        continue;
-      }
-      if (roster.has(item.id)) {
-        /*
-         * Occupied, and not by anything we registered in THIS instance. The
-         * platform refuses duplicate registration (never upserts) and offers
-         * no removal API, so there is nothing safe to attempt — the scan's
-         * whole job is to say WHO holds it: a hot-reload ghost of ours
-         * (restart clears it) or a genuine stranger (rename the file).
-         */
-        const ghostNote = await ownGhostNote(item.id);
-        if (ghostNote !== null) {
-          ghosts.add(item.id);
-          foreign.add(item.id);
-          skipped.push({ id: item.id, reason: ghostNote });
-          continue;
-        }
-        foreign.add(item.id);
-        skipped.push({ id: item.id, reason: "已经有人注册了这个 id" });
-        continue;
-      }
-      holdRegistration(item.id);
-      try {
-        await registerOne(item.id, parsed.meta, parsed.body);
-        added.push(item.id);
-      } catch (error) {
-        /*
-         * A duplicate here means an occupier appeared between the roster read
-         * and this register — the twin/ghost shapes the shared state and the
-         * scan mutex are supposed to prevent, caught at their last chance.
-         * If the composition fingerprint says the occupier is provably this
-         * plugin, report it as the identified ghost it is instead of a raw
-         * 「Duplicate agent preset」 the user could do nothing with.
-         */
-        const ghostNote = await ownGhostNote(item.id);
-        if (ghostNote !== null) {
-          ghosts.add(item.id);
-          foreign.add(item.id);
-          skipped.push({ id: item.id, reason: ghostNote });
-        } else {
-          problems.push(`${item.id}: ${error.message ?? error}`);
-        }
-      } finally {
-        releaseRegistration(item.id);
-      }
-    }
-    // A roster we could read, and every file walked: `owned` is now an answer
-    // rather than "not yet", which is what lets the panel draw 「未注册」 at all.
-    scannedOnce = true;
-    return { added, reloaded, skipped, problems };
-  }
-
-  /**
-   * The only way anyone runs a scan: queued behind every other scan, across
-   * every live apply() of this plugin (the chain lives in `REG_STATE`).
-   *
-   * A scan's decisions span awaits — the roster read, each registration — so
-   * two overlapping scans interleave their read/register windows even though
-   * each one is internally consistent. On a fresh install the boot scan and a
-   * reload-triggered re-apply's scan could both see an empty roster for the
-   * same id and both attempt the register; the loser's 「Duplicate agent
-   * preset」 was the 同名 Id failure the panel showed. Serializing makes the
-   * second scan a no-op instead of a competitor: by its turn the roster
-   * already carries the first scan's rows, and `owned` (shared) names their
-   * owner.
-   *
-   * A failed scan must not poison the chain, so the chain stores a settled
-   * swallow while the caller still receives the real outcome.
-   */
-  function scan() {
-    const run = REG_STATE.scans.then(
-      () => scanOnce(),
-      () => scanOnce(),
-    );
-    REG_STATE.scans = run.then(
-      () => {},
-      () => {},
-    );
-    return run;
-  }
-
-  /**
-   * Which wife the next session will actually use.
-   *
-   * The roster is the authority, but the service exposes it on more than one
-   * face and they are not interchangeable:
-   *   - `remoteExportList()` returns `AgentPresetRow`, documented with
-   *     `isDefault: boolean` ("each marked when it is the default");
-   *   - `compositionInventory()` returns `AgentPresetComposition`, which also
-   *     declares `isDefault: boolean`;
-   *   - `list()` returns `AgentPreset`, whose shape is *not* promised to carry
-   *     the flag at all.
-   * So probe all three in that order and take the first face that answers.
-   * Trusting `list()` alone is exactly how the panel lost the selected row.
-   *
-   * `source` is the first face that returned rows at all, which is what tells
-   * "nobody is the default" apart from "this face does not report it".
-   *
-   * @returns {Promise<{ id: string | null, source: string | null, error: string | null }>}
-   */
-  async function readDefaultId() {
-    let source = null;
-    // The explicit `selectedDefault` as the settings face holds it: a string, or
-    // `null` when it is deliberately unset. `undefined` means no face on this
-    // profile can express the difference, which is what tells a writer whether a
-    // CLEAR is checkable at all.
-    let field;
-    const failures = [];
-    // The field this panel WRITES, read back first. `selectedDefault` is what the
-    // registry actually mounts for a new session, so trusting the roster's
-    // `isDefault` instead is how the switch and the border ended up disagreeing:
-    // the panel wrote one field and displayed another.
-    try {
-      const settings = ctx.get("settings");
-      const described =
-        settings === undefined || settings === null
-          ? null
-          : settings.describe?.();
-      if (Array.isArray(described)) {
-        if (source === null) source = "settings";
-        for (const row of described) {
-          if (oneLine(row?.ns) !== REGISTRY_NS) continue;
-          const picked = oneLine(row?.value?.selectedDefault);
-          field = picked === "" ? null : picked;
-          if (picked !== "")
-            return { id: picked, source: "settings", error: null, field };
-          break;
-        }
-        // Compatibility net: the registry is the only row that declares this
-        // field, but a deployment that moved it must not lose the default.
-        for (const row of described) {
-          const picked = oneLine(row?.value?.selectedDefault);
-          if (picked !== "")
-            return { id: picked, source: "settings", error: null, field: picked };
-        }
-      }
-    } catch (error) {
-      failures.push(`settings: ${error?.message ?? error}`);
-    }
-    for (const [face, read] of [
-      [
-        "remoteExportList",
-        async () => (await ctx.agentPresets.remoteExportList?.())?.presets,
-      ],
-      [
-        "compositionInventory",
-        async () => await ctx.agentPresets.compositionInventory?.(),
-      ],
-      ["list", async () => await ctx.agentPresets.list?.()],
-    ]) {
-      try {
-        const rows = await read();
-        if (!Array.isArray(rows)) continue;
-        if (source === null) source = face;
-        const hit = rows.find((row) => row?.isDefault === true);
-        if (hit !== undefined && typeof hit.id === "string" && hit.id !== "") {
-          return { id: hit.id, source: face, error: null, field };
-        }
-      } catch (error) {
-        failures.push(`${face}: ${error?.message ?? error}`);
-      }
-    }
-    return {
-      id: null,
-      source,
-      error: failures.length > 0 ? failures.join("；") : null,
-      field,
-    };
-  }
-
-  /**
-   * Panel state. `defaultId` comes from the LIVE roster rather than from the
-   * config file: `selectedDefault` can be stale, or point at a preset that no
-   * longer resolves, and the roster is what actually decides the next session.
-   *
-   * Opening the panel is also a repair point — see `reconcileDefault`, which runs
-   * first here. A default that names nothing does not merely read wrong: the
-   * registry refuses every new session with `agent-preset/not-found`, so leaving
-   * the panel to only REPORT it would mean reporting a broken app.
-   */
-  async function status() {
-    const healed = await reconcileDefault();
-    // Live, not straight from the cache: `selectedDefault` can be stale or point
-    // at a preset that no longer resolves, and the roster is what actually decides
-    // the next session. Reporting the cached id is how the default's active border
-    // stayed on a row the user had already moved off.
-    await refreshDefault();
-    const skeleton = readSkeleton();
-    return {
-      ok: true,
-      dir,
-      dirSource,
-      writable,
-      dirExists: fs.existsSync(dir),
-      template: templatePath,
-      configurable: Boolean(ctx.get("configEditor")),
-      /*
-       * Chat or utility tools. The panel draws one switch from this, and a
-       * team preset ignores it by construction (`templateRowsFor("team")`).
-       */
-      mode: currentMode,
-      modes: MODES,
-      defaultId: cachedDefault.id,
-      defaultSource: cachedDefault.source,
-      defaultError: cachedDefault.error,
-      /*
-       * What the repair did, in the one case where the user has to know: the
-       * default they set is gone. `null` when there was nothing to repair.
-       * `ok: false` is the degrade path and it has to be visible — a default that
-       * names nothing still blocks every new session, so a silent failure here
-       * would look exactly like the bug it is supposed to fix.
-       */
-      defaultHeal:
-        healed.healed !== null
-          ? {
-              ok: true,
-              from: healed.healed,
-              nowDefault: healed.nowDefault ?? null,
-              moved: healed.moved ?? [],
-            }
-          : healed.from === undefined
-            ? null
-            : { ok: false, from: healed.from, reason: healed.reason },
-      skeleton: {
-        present: skeleton !== null,
-        file: skeleton === null ? path.join(dir, SKELETON_FILE) : skeleton.file,
-        chars: skeleton === null ? 0 : skeleton.chars,
-        slots:
-          skeleton === null ? 0 : skeleton.text.split("[[body]]").length - 1,
-        rev: skeleton === null ? null : skeleton.rev,
-      },
-      owned: [...owned.keys()].sort(),
-      files: listFiles(),
-    };
-  }
-
-  /** Everything the editor needs to fill its fields — plus the token it hands back on save. */
-  function readOne(request) {
-    const id = String(request.id ?? "").trim();
-    if (!ID_OK.test(id))
-      return { ok: false, error: `id 不合法：${id || "(空)"}` };
-    const full = fileFor(id);
-    if (!fs.existsSync(full))
-      return { ok: false, error: `文件不存在：${full}` };
-    const parsed = readPersona(full);
-    const name = oneLine(parsed.meta.name) || id;
-    const skeleton = skeletonFor(parsed.meta, readSkeleton());
-    const poured = assemble(
-      name,
-      parsed.body,
-      skeleton === null ? null : skeleton.text,
-    );
-    return {
-      ok: true,
-      id,
-      name,
-      order: normalizeOrder(parsed.meta.order) ?? null,
-      description: oneLine(parsed.meta.description) || "",
-      group: oneLine(parsed.meta.group) || "",
-      template: oneLine(parsed.meta.template) || "",
-      body: parsed.body,
-      chars: parsed.chars,
-      charsFull: poured.text.length,
-      problems: poured.problems,
-      skeletonChars: skeleton === null ? 0 : skeleton.chars,
-      rev: parsed.rev,
-      mtimeMs: parsed.mtimeMs,
-      size: parsed.size,
-      file: full,
-      // The assembled prompt, only for the reader who asked for it. The editor
-      // opens rows constantly and never needs it — `charsFull` already answers
-      // "how long does this get" — while the preview window needs the whole
-      // thing and nothing else. Carrying it on every `get` would double the
-      // payload of every click to the roster payload of the one button that
-      // reads it.
-      ...(request.assembled === true ? { assembled: poured.text } : null),
-    };
-  }
-
-  /** Refuse before touching the disk when another owner already holds the id. */
-  async function ensureFree(id) {
-    if (owned.has(id)) return null;
-    try {
-      const taken = new Set(
-        (await ctx.agentPresets.list()).map((preset) => preset.id),
-      );
-      if (taken.has(id))
-        return `${id} 已经被别的所有者注册，dsh-waifu-agents 不接管它`;
-    } catch {
-      // Roster unreadable: let `register` report the duplicate itself.
-    }
-    return null;
-  }
-
-  async function create(request) {
-    if (!writable) return readOnly();
-    const id = String(request.id ?? "").trim() || idForName(request.name);
-    if (!ID_OK.test(id)) {
-      return {
-        ok: false,
-        error: `id 不合法（只允许字母、数字、连字符，可以中文）：${id}`,
-      };
-    }
-    if (reserved(id))
-      return { ok: false, error: `「${id}」是保留名字，扫描时会跳过它` };
-    const full = fileFor(id);
-    if (fs.existsSync(full))
-      return { ok: false, error: `已经有一个 wife 用这个 id 了：${id}` };
-    const body = String(request.body ?? "").trim();
-    if (!body) return { ok: false, error: "「回答方式」不能为空" };
-    const available = readSkeleton();
-    const order = normalizeOrder(request.order) ?? nextOrder();
-    const meta = {
-      name: request.name,
-      order,
-      description: request.description,
-      group: request.group,
-      // A new persona joins the shared skeleton when one exists, so "just write
-      // her personality" is the default rather than something to remember.
-      template:
-        request.template ?? (available === null ? undefined : SKELETON_FILE),
-    };
-    const templateIssue = templateProblem(meta);
-    if (templateIssue !== null) return { ok: false, error: templateIssue };
-    const skeleton = skeletonFor(meta, available);
-    const poured = assemble(
-      oneLine(meta.name) || id,
-      body,
-      skeleton === null ? null : skeleton.text,
-    );
-    if (!poured.ok) return { ok: false, error: poured.problems.join("；") };
-    const conflict = await ensureFree(id);
-    if (conflict !== null) return { ok: false, error: conflict };
-    writeAtomic(full, renderPersona({ ...meta, body }));
-    holdRegistration(id);
-    try {
-      await registerOne(id, meta, body);
-    } catch (error) {
-      try {
-        fs.unlinkSync(full);
-      } catch {
-        // Best effort: an orphan file is still visible in `list`.
-      }
-      return {
-        ok: false,
-        error: `注册失败（文件已回滚）：${error.message ?? error}`,
-      };
-    } finally {
-      releaseRegistration(id);
-    }
-    return {
-      ok: true,
-      id,
-      order,
-      rev: revision(fs.readFileSync(full, "utf8")),
-      file: full,
-    };
-  }
-
-  /**
-   * Edit a wife. The id is invisible, so the file follows the display name: a
-   * name change moves `<old>.md` onto the slug of the new name, repoints the
-   * default and re-registers under the new id. Anything else is written in
-   * place.
-   *
-   * `idForName` is given `self` so the current file stays out of the collision
-   * set: without that, saving an unchanged name would collide with its own file
-   * and fork the wife onto `name-2`.
-   */
-  async function update(request) {
-    if (!writable) return readOnly();
-    const id = String(request.id ?? "").trim();
-    if (!ID_OK.test(id))
-      return { ok: false, error: `id 不合法：${id || "(空)"}` };
-    const full = fileFor(id);
-    if (!fs.existsSync(full))
-      return { ok: false, error: `文件不存在：${full}` };
-    const original = fs.readFileSync(full, "utf8");
-    const current = readPersona(full);
-    /*
-     * Optimistic lock. An outside editor (or this panel in another window) may
-     * have replaced the file since the caller read it, and the caller's draft
-     * was built from the OLD text — saving it would silently delete whatever the
-     * other writer put there. Refusing is the only honest answer.
-     */
-    const expected = String(request.rev ?? "").trim();
-    if (expected !== "" && expected !== current.rev) {
-      return {
-        ok: false,
-        conflict: true,
-        rev: current.rev,
-        error:
-          `${id}.md 在磁盘上变过（外部编辑器或另一个窗口改过），这次保存没有写入。` +
-          "重新打开这一行看一遍，再把两边的改动合并。",
-      };
-    }
-    const next = {
-      name:
-        request.name !== undefined
-          ? oneLine(request.name)
-          : oneLine(current.meta.name),
-      order:
-        request.order !== undefined
-          ? normalizeOrder(request.order)
-          : normalizeOrder(current.meta.order),
-      description:
-        request.description !== undefined
-          ? oneLine(request.description)
-          : oneLine(current.meta.description),
-      group:
-        request.group !== undefined
-          ? oneLine(request.group)
-          : oneLine(current.meta.group),
-      template:
-        request.template !== undefined
-          ? oneLine(request.template)
-          : oneLine(current.meta.template),
-      body: request.body !== undefined ? String(request.body) : current.body,
-    };
-    if (!next.body.trim()) return { ok: false, error: "「回答方式」不能为空" };
-    const templateIssue = templateProblem(next);
-    if (templateIssue !== null) return { ok: false, error: templateIssue };
-    const skeleton = skeletonFor(next, readSkeleton());
-    const poured = assemble(
-      oneLine(next.name) || id,
-      next.body,
-      skeleton === null ? null : skeleton.text,
-    );
-    if (!poured.ok) return { ok: false, error: poured.problems.join("；") };
-    // A cleared name must not move anything: `idForName('')` answers `persona`,
-    // and an empty field is not an instruction to rename the file to that. The
-    // row then falls back to showing the id, as it does for a file with no name.
-    const to = next.name === "" ? id : idForName(next.name, id);
-    const moved = to !== id;
-    const target = moved ? fileFor(to) : full;
-    if (moved && fs.existsSync(target))
-      return { ok: false, error: `已经有一个 wife 用这个文件名了：${to}` };
-    const conflict = await ensureFree(to);
-    if (conflict !== null) return { ok: false, error: conflict };
-    // Move first, then write: the file that exists at every moment is one or the
-    // other, never a half-written merge of both.
-    if (moved) fs.renameSync(full, target);
-    writeAtomic(target, renderPersona(next));
-    /*
-     * Both ids are held across the swap. The old one is still the file's name
-     * until `renameSync` above, and the new one is what a roster read sees from
-     * that moment on — while neither is in `owned`, because the platform only
-     * knows one registration at a time. This is the window the panel used to
-     * misread as 「被别的所有者占用了」.
-     */
-    holdRegistration(id);
-    holdRegistration(to);
-    try {
-      await unregister(id);
-      await registerOne(to, next, next.body);
-    } catch (error) {
-      if (moved) {
-        try {
-          fs.rmSync(target, { force: true });
-        } catch {
-          // A leftover file under the new name is still visible in `list`.
-        }
-      }
-      writeAtomic(full, original);
-      try {
-        await registerOne(id, current.meta, current.body);
-      } catch {
-        // The text is on disk either way; a missing registration is a refresh away.
-      }
-      return {
-        ok: false,
-        error: `注册失败（文件已还原，点刷新可重试）：${error.message ?? error}`,
-      };
-    } finally {
-      releaseRegistration(id);
-      releaseRegistration(to);
-    }
-    const defaultFollowed = moved ? await repointDefault(id, to) : "unchanged";
-    return {
-      ok: true,
-      id: to,
-      previousId: id,
-      moved,
-      order: normalizeOrder(next.order) ?? null,
-      rev: revision(fs.readFileSync(target, "utf8")),
-      file: target,
-      defaultFollowed,
-    };
-  }
-
-  /** The id *is* the identity, so renaming means moving the file. */
-  async function rename(request) {
-    if (!writable) return readOnly();
-    const from = String(request.id ?? "").trim();
-    const to = String(request.to ?? "").trim();
-    if (!ID_OK.test(from))
-      return { ok: false, error: `原 id 不合法：${from || "(空)"}` };
-    if (!ID_OK.test(to)) {
-      return {
-        ok: false,
-        error: `新 id 不合法（只允许字母、数字、连字符，可以中文）：${to || "(空)"}`,
-      };
-    }
-    if (reserved(to))
-      return { ok: false, error: `「${to}」是保留名字，扫描时会跳过它` };
-    if (from === to) return { ok: true, id: to, unchanged: true };
-    const fromFile = fileFor(from);
-    const toFile = fileFor(to);
-    if (!fs.existsSync(fromFile))
-      return { ok: false, error: `文件不存在：${fromFile}` };
-    if (fs.existsSync(toFile))
-      return { ok: false, error: `已经有一个 wife 叫 ${to} 了` };
-    const conflict = await ensureFree(to);
-    if (conflict !== null) return { ok: false, error: conflict };
-    const wasOwned = owned.has(from);
-    const { meta, body } = parseFrontMatter(fs.readFileSync(fromFile, "utf8"));
-    fs.renameSync(fromFile, toFile);
-    // Both names are ours across the swap; see the note in `update`.
-    holdRegistration(from);
-    holdRegistration(to);
-    try {
-      await unregister(from);
-      try {
-        await registerOne(to, meta, body);
-      } catch (error) {
-        fs.renameSync(toFile, fromFile);
-        if (wasOwned) {
-          try {
-            await registerOne(from, meta, body);
-          } catch {
-            // A failed rollback still leaves both files on disk and readable.
-          }
-        }
-        return {
-          ok: false,
-          error: `改名失败（已回滚）：${error.message ?? error}`,
-        };
-      }
-    } finally {
-      releaseRegistration(from);
-      releaseRegistration(to);
-    }
-    // `selectedDefault` is stored as an id, so it has to follow the move:
-    // otherwise the default points at a preset that no longer exists, and every
-    // new session fails with `agent-presets/not-found`.
-    const defaultFollowed = await repointDefault(from, to);
-    return {
-      ok: true,
-      id: to,
-      from,
-      order: normalizeOrder(meta.order) ?? null,
-      file: toFile,
-      defaultFollowed,
-    };
-  }
-
-  /**
-   * Follow a rename in the registry's `selectedDefault`.
-   *
-   * Best effort, exactly like `setDefault`: without a `configEditor` service
-   * there is nothing to write to, and a rename must not fail because of that.
-   *
-   * @param {string} from - the id the default may currently point at
-   * @param {string} to - the id it should point at instead
-   * @returns {Promise<'moved' | 'unchanged' | 'unavailable' | 'failed'>}
-   */
-  async function repointDefault(from, to) {
-    const configEditor = ctx.get("configEditor");
-    if (configEditor === undefined || configEditor === null)
-      return "unavailable";
-    let entry;
-    try {
-      entry = findRegistryEntry(configEditor);
-    } catch {
-      return "failed";
-    }
-    if (entry === undefined) return "failed";
-    const before = await refreshDefault({ force: true });
-    let seen = {};
-    try {
-      await configEditor.edit(entry, (current) => {
-        seen = current ?? {};
-        if (seen.selectedDefault !== from) return seen;
-        return { ...seen, selectedDefault: to };
-      });
-    } catch {
-      return "failed";
-    }
-    if (seen?.selectedDefault !== from) return "unchanged";
-    /*
-     * Same rule as `setDefault`: the write only counts once the live registry
-     * agrees with it. Faking the cache here is worse than in `setDefault` — a
-     * fabricated id survives the rename, the panel keeps drawing the default on
-     * the old row, and the platform mounts a preset that no longer exists.
-     */
-    const settled = await verifyDefault(to, {
-      previous: before.field,
-      checkable: before.field !== undefined,
-    });
-    if (settled.verified) return "moved";
-    // An uncheckable profile falls back to the write's own word, exactly as this
-    // op behaved before verification existed; a face that actively contradicted
-    // the write is the only case worth calling a failure.
-    return settled.checkable ? "failed" : "moved";
-  }
-
-  /**
-   * Retire a wife without losing her: unregister the preset and rename the file
-   * to `<id>.md.off`.
-   *
-   * Deleting the file outright cannot be undone, and simply leaving it in place
-   * is not an option either — `scan()` re-registers every `*.md` it finds, so a
-   * file that stays put walks straight back into the roster. The `.off` suffix
-   * is outside both `listFiles()` and the scanner, so the text survives while
-   * the wife leaves the roster. Rename it back to `<id>.md` to revive her.
-   */
-  async function remove(request) {
-    if (!writable) return readOnly();
-    const id = String(request.id ?? "").trim();
-    if (!ID_OK.test(id))
-      return { ok: false, error: `id 不合法：${id || "(空)"}` };
-    const full = fileFor(id);
-    if (!fs.existsSync(full))
-      return { ok: false, error: `文件不存在：${full}` };
-    const archived = nextArchiveName(id);
-    /*
-     * Held across the archive rename: between `unregister` and `renameSync` the
-     * file is still `<id>.md` with no registration behind it, and a roster read
-     * in that gap used to draw 「未注册 · 被别的所有者占用了」 on a wife the user
-     * had just archived on purpose.
-     */
-    holdRegistration(id);
-    let wasRegistered = false;
-    try {
-      wasRegistered = await unregister(id);
-      fs.renameSync(full, archived);
-    } finally {
-      releaseRegistration(id);
-    }
-    /*
-     * Retiring the wife the default names used to leave `selectedDefault` pointing
-     * at nothing, and the registry then refuses EVERY new session with
-     * `agent-preset/not-found` (`registry.js:643`) — so the one operation that
-     * deliberately removes a persona was also the one that could break the next
-     * new task, with the archived file sitting right there as if all were well.
-     * `rename()` has followed its id for a while (`repointDefault`); removing had
-     * no such step.
-     *
-     * Best effort by design: the file is already archived and that must not be
-     * undone because the config write failed, so the outcome is reported instead.
-     */
-    const dropped = await moveDefaultOff(id);
-    const follow =
-      dropped.ok === true
-        ? { defaultFollowed: "cleared", defaultCleared: true }
-        : dropped.skipped === true
-          ? { defaultFollowed: "unchanged" }
-          : { defaultFollowed: "failed", defaultError: dropped.reason };
-    return { ok: true, id, file: full, archived, wasRegistered, ...follow };
-  }
-
-  /**
-   * `<id>.md.off`, then `<id>.md.off.2`, `.3` … so archiving twice never
-   * overwrites the first copy. A plain `<id>.off.md` would be wrong: it still
-   * ends in `.md`, and the scanner would pick it straight back up.
-   */
-  function nextArchiveName(id) {
-    const first = path.join(dir, `${id}.md.off`);
-    if (!fs.existsSync(first)) return first;
-    for (let n = 2; n < 1000; n += 1) {
-      const candidate = path.join(dir, `${id}.md.off.${n}`);
-      if (!fs.existsSync(candidate)) return candidate;
-    }
-    return path.join(dir, `${id}.md.off.${Date.now()}`);
-  }
-
-  /** `<id>.md.off`, `<id>.md.off.2`, … — everything the roster cannot see. */
-  function hiddenList() {
-    if (!fs.existsSync(dir)) return { ok: true, files: [] };
-    const files = [];
-    for (const entry of fs.readdirSync(dir).sort()) {
-      const match = /^(.*)\.md\.off(?:\.(\d+))?$/.exec(entry);
-      if (match === null) continue;
-      const full = path.join(dir, entry);
-      let stat;
-      try {
-        stat = fs.statSync(full);
-      } catch {
-        continue;
-      }
-      if (!stat.isFile()) continue;
-      files.push({
-        id: match[1],
-        archived: entry,
-        seq: match[2] === undefined ? 1 : Number(match[2]),
-        mtimeMs: stat.mtimeMs,
-        size: stat.size,
-      });
-    }
-    files.sort((a, b) => b.mtimeMs - a.mtimeMs);
-    return { ok: true, files };
-  }
-
-  /**
-   * Bring one hidden wife back: pick a free id, rename the archive to `<id>.md`,
-   * then register her again.
-   *
-   * Picking the id is the part a human gets wrong. `<id>.md` may already belong
-   * to a NEWER wife who reused the name, and then the archive has to land on
-   * `<id>-2.md` rather than clobber her.
-   */
-  async function restore(request) {
-    if (!writable) return readOnly();
-    const archived = path.basename(String(request.archived ?? "").trim());
-    if (archived === "" || !/\.md\.off(?:\.\d+)?$/.test(archived)) {
-      return { ok: false, error: `不是归档文件：${archived || "(空)"}` };
-    }
-    const source = path.join(dir, archived);
-    if (!fs.existsSync(source))
-      return { ok: false, error: `归档不存在：${source}` };
-    const base = archived.replace(/\.md\.off(?:\.\d+)?$/, "");
-    const id = fs.existsSync(fileFor(base)) ? idForName(base) : base;
-    if (!ID_OK.test(id))
-      return { ok: false, error: `恢复不了：「${base}」不是合法的 id` };
-    const target = fileFor(id);
-    if (fs.existsSync(target))
-      return { ok: false, error: `已经有一个 wife 用这个 id 了：${id}` };
-    const parsed = readPersona(source);
-    const templateIssue = templateProblem(parsed.meta);
-    if (templateIssue !== null) return { ok: false, error: templateIssue };
-    const skeleton = skeletonFor(parsed.meta, readSkeleton());
-    const meta = { ...parsed.meta, name: oneLine(parsed.meta.name) || id };
-    const poured = assemble(
-      meta.name,
-      parsed.body,
-      skeleton === null ? null : skeleton.text,
-    );
-    if (!poured.ok) return { ok: false, error: poured.problems.join("；") };
-    fs.renameSync(source, target);
-    holdRegistration(id);
-    try {
-      await registerOne(id, meta, parsed.body);
-    } catch (error) {
-      fs.renameSync(target, source);
-      return {
-        ok: false,
-        error: `恢复失败（已放回归档）：${error.message ?? error}`,
-      };
-    } finally {
-      releaseRegistration(id);
-    }
-    return { ok: true, id, archived, file: target, renamed: id !== base };
-  }
-
-  /**
-   * One action over many wives. Every item goes through the SAME single-item
-   * code path, and per-item failures are reported instead of aborting the batch:
-   * a batch that stops halfway leaves the caller unable to say what happened.
-   */
-  async function batch(request) {
-    const action = String(request.action ?? "").trim();
-    const ids = Array.isArray(request.ids)
-      ? request.ids
-          .map((value) => String(value ?? "").trim())
-          .filter((value) => value !== "")
-      : [];
-    const archived = Array.isArray(request.archived)
-      ? request.archived
-          .map((value) => String(value ?? "").trim())
-          .filter((value) => value !== "")
-      : [];
-    const results = [];
-    if (action === "hide") {
-      if (ids.length === 0) return { ok: false, error: "没有选中任何东西" };
-      for (const id of ids) {
-        const payload = await remove({ id });
-        results.push({
-          key: id,
-          ok: payload.ok === true,
-          error: payload.ok === true ? null : payload.error,
-        });
-      }
-      return { ok: true, action, results };
-    }
-    if (action === "restore") {
-      if (archived.length === 0)
-        return { ok: false, error: "没有选中任何归档" };
-      for (const name of archived) {
-        const payload = await restore({ archived: name });
-        results.push({
-          key: name,
-          ok: payload.ok === true,
-          error: payload.ok === true ? null : payload.error,
-        });
-      }
-      return { ok: true, action, results };
-    }
-    if (action === "group" || action === "order") {
-      if (ids.length === 0) return { ok: false, error: "没有选中任何东西" };
-      const group =
-        request.group === undefined ? undefined : oneLine(request.group);
-      let order = normalizeOrder(request.order);
-      for (const id of ids) {
-        const payload =
-          action === "group"
-            ? await update({
-                id,
-                group,
-                rev: request.revs === undefined ? undefined : request.revs[id],
-              })
-            : await update({
-                id,
-                order,
-                rev: request.revs === undefined ? undefined : request.revs[id],
-              });
-        results.push({
-          key: id,
-          ok: payload.ok === true,
-          error: payload.ok === true ? null : payload.error,
-        });
-        if (
-          payload.ok === true &&
-          action === "order" &&
-          typeof order === "number"
-        )
-          order += 1;
-      }
-      return { ok: true, action, results };
-    }
-    return {
-      ok: false,
-      error: `不认识的批量动作：${action || "(空)"}（可用：hide / restore / group / order）`,
-    };
-  }
-
-  /** The shared skeleton as the panel reads it: raw text, slot count, validation. */
-  function skeletonOp() {
-    const skeleton = readSkeleton();
-    if (skeleton === null) {
-      return {
-        ok: true,
-        present: false,
-        file: path.join(dir, SKELETON_FILE),
-        chars: 0,
-        slots: 0,
-        rev: null,
-        text: "",
-        problems: [],
-      };
-    }
-    const slots = skeleton.text.split("[[body]]").length - 1;
-    const problems = [];
-    if (slots !== 1)
-      problems.push(
-        slots === 0 ? "骨架里没有 [[body]]" : `骨架里有 ${slots} 个 [[body]]`,
-      );
-    for (const match of skeleton.text.matchAll(/\{\{([^{}]*)\}\}/g)) {
-      const variable = match[1].trim();
-      if (
-        !PROMPT_VARIABLE_NAME.test(variable) ||
-        !PROMPT_VARIABLES.has(variable)
-      ) {
-        problems.push(
-          `骨架里的 {{${match[1]}}} 会让整份系统提示词渲染失败：只支持 provider / model / cwd`,
-        );
-      }
-    }
-    return {
-      ok: true,
-      present: true,
-      file: skeleton.file,
-      chars: skeleton.chars,
-      slots,
-      rev: skeleton.rev,
-      text: skeleton.text,
-      problems,
-    };
-  }
-
-  /**
-   * Write the shared skeleton, then re-register everyone.
-   *
-   * Changing the frame changes EVERY assembled prefix, so a skeleton that is
-   * saved but not applied is the worst of both worlds: the file says one thing
-   * and every live session keeps reading the other.
-   */
-  async function setSkeleton(request) {
-    if (!writable) return readOnly();
-    const text = String(request.text ?? "");
-    if (text.trim() === "")
-      return { ok: false, error: "骨架不能是空的：要删掉它就直接删文件。" };
-    const slots = text.split("[[body]]").length - 1;
-    if (slots === 0)
-      return {
-        ok: false,
-        error: "骨架里必须有 [[body]]，否则人设正文没有地方可放",
-      };
-    if (slots > 1)
-      return { ok: false, error: `骨架里有 ${slots} 个 [[body]]，只能有一个` };
-    for (const match of text.matchAll(/\{\{([^{}]*)\}\}/g)) {
-      const variable = match[1].trim();
-      if (
-        !PROMPT_VARIABLE_NAME.test(variable) ||
-        !PROMPT_VARIABLES.has(variable)
-      ) {
-        return {
-          ok: false,
-          error: `骨架里的 {{${match[1]}}} 会让整份系统提示词渲染失败：只支持 provider / model / cwd`,
-        };
-      }
-    }
-    const full = path.join(dir, SKELETON_FILE);
-    const current = readSkeleton();
-    const expected = String(request.rev ?? "").trim();
-    if (expected !== "" && current !== null && expected !== current.rev) {
-      return {
-        ok: false,
-        conflict: true,
-        rev: current.rev,
-        error:
-          "骨架在磁盘上变过（外部编辑器改过），这次保存没有写入。重新打开看一遍。",
-      };
-    }
-    const finalText = text.endsWith("\n") ? text : `${text}\n`;
-    writeAtomic(full, finalText);
-    const result = await scan();
-    // Every persona session re-reads the skeleton on its next turn — that is the
-    // price of resolving the text per assembly — so this is "who is about to
-    // notice", which is exactly what the panel should say out loud.
-    let liveSessions = 0;
-    try {
-      const registry = ctx.get("agents", false);
-      const live = typeof registry?.list === "function" ? registry.list() : [];
-      liveSessions = live.filter((agent) => owned.has(anchorOf(agent))).length;
-    } catch {
-      liveSessions = 0;
-    }
-    return {
-      ok: true,
-      liveSessions,
-      chars: finalText.length,
-      slots,
-      rev: revision(finalText),
-      reloaded: result.reloaded,
-      added: result.added,
-      problems: result.problems,
-    };
-  }
-
-  /**
-   * Search the text the MODEL would read, without shipping any of it.
-  /**
-   * Search the text the MODEL would read, without shipping any of it.
-   *
-   * The panel only receives the snippet and whether it came from the shared
-   * skeleton or from her own part, so a directory full of long personas costs
-   * the browser nothing to search.
-   */
-  function search(request) {
-    const needle = String(request.query ?? "").trim();
-    if (needle === "")
-      return { ok: true, query: needle, hits: [], truncated: false };
-    const lower = needle.toLowerCase();
-    const limit = Math.max(1, Math.min(200, Number(request.limit ?? 50) || 50));
-    const skeleton = readSkeleton();
-    const hits = [];
-    for (const item of listFiles()) {
-      const parsed = readPersona(fileFor(item.id));
-      const frame = skeletonFor(parsed.meta, skeleton);
-      // Search the two pieces SEPARATELY, so a hit can say where it lives. The
-      // assembled text cannot answer that: a match after the body slot is still
-      // skeleton text, and comparing offsets against the slot gets it backwards.
-      const pieces = [];
-      if (frame !== null) pieces.push({ source: "skeleton", text: frame.text });
-      pieces.push({ source: "body", text: parsed.body });
-      for (const piece of pieces) {
-        const haystack = piece.text.toLowerCase();
-        let from = 0;
-        while (hits.length < limit) {
-          const at = haystack.indexOf(lower, from);
-          if (at < 0) break;
-          const start = Math.max(0, at - 40);
-          const end = Math.min(piece.text.length, at + needle.length + 40);
-          hits.push({
-            id: item.id,
-            name: item.name,
-            source: piece.source,
-            index: at,
-            snippet: `${start > 0 ? "…" : ""}${piece.text.slice(start, end)}${end < piece.text.length ? "…" : ""}`,
-          });
-          from = at + needle.length;
-        }
-        if (hits.length >= limit) break;
-      }
-      if (hits.length >= limit) break;
-    }
-    return { ok: true, query: needle, hits, truncated: hits.length >= limit };
-  }
-
-  /**
-   * Store a whole markdown file. Front matter is honoured when present, so an
-   * exported file imports back unchanged; a file without front matter becomes
-   * one long answer style.
-   */
-  async function importMd(request) {
-    const content = String(request.content ?? "");
-    if (!content.trim()) return { ok: false, error: "导入的内容是空的" };
-    const { meta, body } = parseFrontMatter(content);
-    if (!body)
-      return { ok: false, error: "这个 md 的 front matter 之后没有内容" };
-    const id =
-      String(request.id ?? "").trim() || idForName(meta.name || request.name);
-    return create({
-      id,
-      name: meta.name ?? request.name,
-      order: meta.order,
-      description: meta.description ?? request.description,
-      body,
-    });
-  }
-
-  function exportOne(request) {
-    const id = String(request.id ?? "").trim();
-    if (!ID_OK.test(id))
-      return { ok: false, error: `id 不合法：${id || "(空)"}` };
-    const full = fileFor(id);
-    if (!fs.existsSync(full))
-      return { ok: false, error: `文件不存在：${full}` };
-    return {
-      ok: true,
-      id,
-      filename: `${id}.md`,
-      content: fs.readFileSync(full, "utf8"),
-    };
-  }
-
-  /**
-   * Every file's exact text in one response.
-   *
-   * Kept for the `/persona` command and for anything scripting against the
-   * route. The PANEL does not use it: one JSON array of every body would be the
-   * multi-megabyte response this avoids, so a batch export goes through
-   * `exportArchive` (one `.zip`, one download) and a single file through
-   * `export`. The cap below is what keeps the command path from becoming that
-   * by accident: a limit nobody can hit is not a limit.
-   */
-  const EXPORT_ALL_LIMIT = 8 * 1024 * 1024;
-
-  function exportAll() {
-    const files = [];
-    let total = 0;
-    for (const item of listFiles()) {
-      const content = fs.readFileSync(fileFor(item.id), "utf8");
-      total += Buffer.byteLength(content, "utf8");
-      if (total > EXPORT_ALL_LIMIT) {
-        return {
-          ok: false,
-          truncated: true,
-          error: `导出全部超过上限（${Math.round(EXPORT_ALL_LIMIT / 1024 / 1024)}MB）：改用逐条导出，或者直接去目录里拿文件。`,
-        };
-      }
-      files.push({ id: item.id, filename: `${item.id}.md`, content });
-    }
-    return { ok: true, files, bytes: total };
-  }
-
-  /**
-   * A batch export as ONE archive.
-   *
-   * The panel used to answer 「导出全部」 by pulling each file separately and
-   * handing the browser a download per file: twelve personas meant twelve save
-   * dialogs, and nothing stopped them from landing in twelve different folders.
-   * A single `.zip` makes the whole batch one dialog and one destination — the
-   * browser cannot be told a directory, so the directory has to be implied.
-   *
-   * `ids` is optional and defaults to every visible file. Hidden personas
-   * (`.md.off`) are NOT included: they are not in the roster, and an archive
-   * containing them would resurrect files the user deliberately put away.
-   */
   /*
-   * 16MB of raw markdown, which becomes ~21MB of base64 inside one JSON response
-   * — about as large as a single loopback answer should get before the renderer
-   * starts holding three copies of it (string, base64, Blob). A directory that
-   * big is thousands of personas; refusing with a number beats truncating.
-   */
-  const EXPORT_PACK_LIMIT = 16 * 1024 * 1024;
-
-  function exportArchive(request) {
-    const asked = Array.isArray(request?.ids) ? request.ids.map((id) => String(id)) : null;
-    const ids = asked === null ? listFiles().map((item) => item.id) : asked;
-    const entries = [];
-    const missing = [];
-    let total = 0;
-    for (const id of ids) {
-      if (!ID_OK.test(id) || !fs.existsSync(fileFor(id))) {
-        missing.push(id);
-        continue;
-      }
-      let data;
-      try {
-        data = fs.readFileSync(fileFor(id));
-      } catch {
-        missing.push(id);
-        continue;
-      }
-      total += data.length;
-      if (total > EXPORT_PACK_LIMIT) {
-        return {
-          ok: false,
-          truncated: true,
-          error: `一次导出超过上限（${Math.round(EXPORT_PACK_LIMIT / 1024 / 1024)}MB）：分批导出，或者直接去目录里拿文件。`,
-        };
-      }
-      entries.push({ name: `${id}.md`, data });
-    }
-    if (entries.length === 0) return { ok: false, error: "没有可导出的文件。" };
-
-    const stamp = new Date();
-    const tag = [
-      stamp.getFullYear(),
-      String(stamp.getMonth() + 1).padStart(2, "0"),
-      String(stamp.getDate()).padStart(2, "0"),
-    ].join("");
-    let archive;
-    try {
-      archive = buildZip(entries, { date: stamp });
-    } catch (failure) {
-      return { ok: false, error: String(failure?.message ?? failure) };
-    }
-    /*
-     * base64 rather than a byte array: the route answers JSON, and a 300-entry
-     * archive as `[12,34,…]` would be several times the payload for no benefit.
-     * The panel turns it back into a Blob and hands it to one download.
-     */
-    return {
-      ok: true,
-      filename: `waifu-personas-${tag}.zip`,
-      count: entries.length,
-      bytes: total,
-      missing,
-      base64: archive.toString("base64"),
-    };
-  }
-
-  /**
-   * The persona this package ships, so a user can edit it locally and import it back.
+   * 先封已经在跑的，再跟上其余的。
    *
-   * The NAME is deliberately not hard-coded. The shipped file is a real persona —
-   * it gets renamed whenever a different one is chosen to ship — and a pinned name
-   * turns that rename into a button that only ever answers 「包内没有模板」. So the
-   * directory decides: the first `*.md` that is not a reserved name, and `RESERVED`
-   * already spells those (`README.md`, the legacy `_template.json`).
+   * `agent/created` 是 host 文档化的每 agent 注册接缝（
+   * `dsh-agent-preset/skills/.../practices.md: register per-agent behaviour on
+   * agent.ctx, obtained in an agent/created listener`），`restrict`/`guard`
+   * 建出的 effect 归那个 agent 的 fiber 所有——于是被 host 注销的 agent 带着
+   * 自己的闸门走。`forget` 只丢本文件的账。
    */
-  function shippedPersona() {
-    const home = path.join(PACKAGE_DIR, "personas");
-    let entries;
-    try {
-      entries = fs.readdirSync(home).sort();
-    } catch {
-      return null;
-    }
-    for (const entry of entries) {
-      if (!entry.endsWith(".md") || RESERVED.has(entry.toLowerCase())) continue;
-      const full = path.join(home, entry);
-      try {
-        if (fs.statSync(full).isFile()) return full;
-      } catch {
-        // An entry that vanished mid-scan is not a reason to fail the op.
-      }
-    }
-    return null;
-  }
+  for (const agent of liveAgents() ?? []) toolFilter.reconcile(agent);
+  ctx.on("agent/created", ({ agent }) => {
+    toolFilter?.reconcile(agent);
+  });
+  ctx.on("agent/disposed", ({ agent }) => {
+    toolFilter?.forget(agent);
+  });
+  ctx.on("dispose", () => toolFilter?.dispose());
 
-  function exportTemplate() {
-    const file = shippedPersona();
-    if (file === null)
-      return {
-        ok: false,
-        error: `包内 personas/ 里没有可下载的人设文件：${path.join(PACKAGE_DIR, "personas")}`,
-      };
-    return {
-      ok: true,
-      filename: path.basename(file),
-      content: fs.readFileSync(file, "utf8"),
-    };
-  }
+  /* ------------------------------------------------- 团队即真预设 */
 
-  /** Write `config.dir` back through the optional configEditor service. */
-  async function setDir(request) {
-    const configEditor = ctx.get("configEditor");
-    if (configEditor === undefined || configEditor === null) {
-      return {
-        ok: false,
-        error:
-          "这个环境没有 configEditor 服务，改不了配置；请直接编辑 profile 的补丁文件。",
-      };
-    }
-    const next = String(request.dir ?? "").trim();
-    let entry;
-    try {
-      entry = configEditor
-        .entries()
-        .find(
-          (row) =>
-            SELF_IDS.includes(row.id) ||
-            row.id === name ||
-            row.patchId === name,
-        );
-    } catch (error) {
-      return { ok: false, error: `读不到配置项：${error.message ?? error}` };
-    }
-    if (entry === undefined)
-      return { ok: false, error: `找不到 ${name} 这条配置项` };
-    try {
-      await configEditor.edit(entry, (current) => {
-        const copy = { ...(current ?? {}) };
-        if (next) copy.dir = next;
-        else delete copy.dir;
-        return copy;
-      });
-    } catch (error) {
-      return { ok: false, error: `写入失败：${error.message ?? error}` };
-    }
-    return {
-      ok: true,
-      dir: next || null,
-      note: "配置已写入；插件会重启并重新扫描目录。",
-    };
-  }
-
-  /**
-   * Flip between pure chat and the full utility toolset.
+  /*
+   * 注册引擎、面板 op 表和团队预设同步住在 `panel-ops.js`。留在这里的是
+   * deps 袋——这块区域与 apply() 其余部分一直共享的东西的诚实清单——外加
+   * 把 op 函数按自己的名字交还的解构，于是下面的分发器和启动链读起来不变。
    *
-   * The write order matters. `mode.json` goes down FIRST, then `scan()`: a
-   * crash between the two leaves the file saying `chat` while the registry
-   * still holds the old rows, and the next boot reads the file and fixes the
-   * registry. The other order would leave a process believing something the
-   * file contradicts.
-   *
-   * Every persona is re-registered because `registrationRev` includes the
-   * mode; a scan with an unchanged rev is a no-op by design. Team presets are
-   * skipped on purpose — `templateRowsFor("team")` ignores the switch, so
-   * their capability list did not change.
+   * 五个 thunk 存在的原因是那些绑定在这里是 `let`：值拷贝会在 `apply` 重新
+   * 赋值的那一刻过期。
    */
-  async function setMode(request) {
-    const requested = String(request?.mode ?? "").trim();
-    if (!MODES.includes(requested)) {
-      return { ok: false, error: `mode 只能是 ${MODES.join(" / ")}。` };
-    }
-    const mode = normalizeMode(requested);
-    const previous = currentMode;
-    if (mode !== previous) {
+  const {
+    batch,
+    create,
+    exportAll,
+    exportArchive,
+    exportOne,
+    exportTemplate,
+    findRegistryEntry,
+    hiddenList,
+    importMd,
+    moveDefaultOff,
+    readDefaultId,
+    readOne,
+    reconcileDefault,
+    rememberTeamPreset,
+    remove,
+    rename,
+    repointDefault,
+    restore,
+    scan,
+    search,
+    setDefault,
+    setDir,
+    setMode,
+    setSkeleton,
+    skeletonOp,
+    status,
+    syncTeamPresets,
+    teamNameForPreset,
+    teamPresetIdByName,
+    update,
+    writeDefault,
+  } = installPanelOps(ctx, {
+    ID_OK,
+    MODES,
+    PROMPT_VARIABLES,
+    PROMPT_VARIABLE_NAME,
+    REG_STATE,
+    RESERVED,
+    SKELETON_FILE,
+    TEAM_ORDER_BASE,
+    assemble,
+    buildDefinition,
+    buildZip,
+    documentText,
+    migratePersona,
+    normalizeMode,
+    normalizeOrder,
+    oneLine,
+    parseFrontMatter,
+    registrationRev,
+    renderPersona,
+    reserved,
+    revision,
+    skeletonFor,
+    templateProblem,
+    PERSONA_PLACEHOLDER,
+    SELF_IDS,
+    MODE_FILE,
+    PACKAGE_DIR,
+    REGISTRY_NS,
+    TEAM_PRESET_PREFIX,
+    anchorOf,
+    config,
+    dir,
+    dirSource,
+    fileFor,
+    foreign,
+    ghosts,
+    holdRegistration,
+    instEpoch,
+    instToken,
+    listFiles,
+    owned,
+    personaMemoryDir,
+    readOnly,
+    readPersona,
+    readSkeleton,
+    refreshDefault,
+    refreshMemorySnapshot: (...args) => refreshMemorySnapshot(...args),
+    registering,
+    releaseRegistration,
+    resettleUnstarted,
+    serviceOf,
+    templatePath,
+    templateRowsFor,
+    verifyDefault,
+    writable,
+    writeAtomic,
+    writeStoredMode,
+    teamRuntimeOf: () => teamRuntime,
+    toolFilterOf: () => toolFilter,
+    currentModeOf: () => currentMode,
+    setCurrentMode: (mode) => {
       currentMode = mode;
-      try {
-        writeStoredMode(mode);
-      } catch (error) {
-        currentMode = previous;
-        return {
-          ok: false,
-          error: `写 ${MODE_FILE} 失败，模式没有改：${error?.message ?? error}`,
-        };
-      }
-      try {
-        await scan();
-      } catch (error) {
-        /*
-         * The file is already the truth, so reporting a failed switch would be
-         * a lie — but so would staying quiet: the model keeps the old tool set
-         * until the scan succeeds. Say which half landed.
-         */
-        return {
-          ok: false,
-          mode,
-          error: `已写入 ${MODE_FILE}（下次启动生效），但这次重新注册失败：${error?.message ?? error}`,
-        };
-      }
-    }
-    return {
-      ok: true,
-      mode,
-      changed: mode !== previous,
-      state: await status(),
-    };
-  }
-
-  /*
-   * The default persona lives on the `agent-preset-registry` entry, not on this
-   * one: `default` is required, and the volatile `selectedDefault` wins over it.
-   * The official agent-preset settings page writes that exact field, and so does
-   * this panel — both point at the same place, so the two entry points cannot
-   * disagree. `default` itself is left untouched as a fallback.
-   */
-  const REGISTRY_ENTRY_ID = "agent-preset-registry";
-  const REGISTRY_PACKAGE = "@deepseek-ai/dsh-agent-preset-registry";
-
-  /**
-   * The profile row that owns `selectedDefault`.
-   *
-   * `entries()` hands back Loader `Entry` objects, whose addressable fields are
-   * `options.id` / `options.name` / `options.config` — the exact shape
-   * `dsh-settings` matches on (`row.options.id === ns` in its `write()`). The
-   * bare `row.id` / `row.name` / `row.patchId` spellings were never on that
-   * class, so they are read second: `row.id` DOES exist, but as a getter that
-   * prefixes the owning tree (`include:agent-preset-registry`), which is why the
-   * prefixed form is checked too.
-   * @param {object} configEditor the configEditor service
-   * @returns {object | undefined} the entry, or undefined when nothing matches
-   */
-  function findRegistryEntry(configEditor) {
-    const idsOf = (row) =>
-      [row?.options?.id, row?.id].filter((value) => typeof value === "string");
-    const namesOf = (row) =>
-      [row?.options?.name, row?.name].filter((value) => typeof value === "string");
-    return configEditor
-      .entries()
-      .find(
-        (row) =>
-          namesOf(row).includes(REGISTRY_PACKAGE) ||
-          idsOf(row).includes(REGISTRY_ENTRY_ID) ||
-          idsOf(row).includes(`include:${REGISTRY_ENTRY_ID}`) ||
-          row?.patchId === REGISTRY_ENTRY_ID,
-      );
-  }
-
-  /**
-   * Which ids the profile actually exposes, for a failure a human can act on.
-   *
-   * A bare 「找不到 …这条配置项」 cannot be diagnosed: the id may have been
-   * renamed, the row may live in a nested Include, or the profile may simply have
-   * no loader tree this service can address. Naming what WAS there turns all
-   * three into a one-line answer.
-   * @param {object} configEditor the configEditor service
-   * @returns {string} one line, never a throw
-   */
-  function describeEntries(configEditor) {
-    try {
-      const seen = configEditor
-        .entries()
-        .map((row) => oneLine(row?.options?.id) || oneLine(row?.id) || "?");
-      return seen.length === 0 ? "(一个都没有)" : seen.join(" / ");
-    } catch (error) {
-      return `(读不到：${error?.message ?? error})`;
-    }
-  }
-
-  /**
-   * Write the registry's `selectedDefault` the way the platform itself does.
-   *
-   * `Settings → Agent Presets` writes through
-   * `ctx.remote.settings.update("agent-preset-registry", { selectedDefault })`
-   * (`ui-agent-preset`), NOT through `configEditor.edit` — and the difference is
-   * not cosmetic. `settings.update()` settles by calling `describe()`, and
-   * `describe()` is the ONLY thing that emits `settings/document-updated`.
-   * `ui-agent-preset` wires exactly one listener for that event:
-   *
-   *     ctx.remote.$on("settings/document-updated", (ns) => {
-   *       if (ns !== "agent-preset-registry") return;
-   *       refresh();   // every seat: the new-task chip, its settings row, …
-   *     })
-   *
-   * A bare `configEditor.edit()` lands the same bytes in the same patch file and
-   * emits nothing, so the app keeps answering from its old snapshot: the panel
-   * shows the new default, the next new task comes up on the PREVIOUS one, and
-   * changing the very same field from the Agent-Presets page works fine. That is
-   * 「在插件页面更新默认人设后，新对话没有同步；在 Agent 预设里改就正常」.
-   *
-   * Routing through the service also removes the need to guess about the write:
-   * `settings.write()` re-reads the projected form itself before it settles, so
-   * the verifier downstream is checking a value the app has already adopted.
-   *
-   * The `configEditor.edit()` path stays as the fallback for a profile that has
-   * no settings service, or whose registry row is not addressable as an entry id
-   * (`settings.write` matches `row.options.id === ns`; `findRegistryEntry` is
-   * more forgiving and also matches the package name).
-   *
-   * @param {{ entry: object, id: string | null }} options `null` clears the field
-   * @returns {Promise<{ ok: true, via: string } | { ok: false, error: string }>}
-   */
-  async function writeDefault({ configEditor, entry, id }) {
-    const settings = serviceOf("settings");
-    if (settings !== undefined && typeof settings.update === "function") {
-      try {
-        if (id === null) {
-          await settings.mutate(REGISTRY_NS, [
-            { op: "unset", path: ["selectedDefault"] },
-          ]);
-        } else {
-          await settings.update(REGISTRY_NS, { selectedDefault: id });
-        }
-        return { ok: true, via: "settings" };
-      } catch (error) {
-        // A profile whose registry row is not addressable by entry id cannot use
-        // the service at all. Fall through and let the editor path try — it is
-        // more forgiving about how the row is named.
-        //
-        // Say so out loud. This fallback lands the same bytes and wakes nobody,
-        // so it reproduces the original bug exactly; degrading into it silently
-        // is how a fix stops being one without anything looking wrong.
-        const viaEditor = await editDefault({ configEditor, entry, id });
-        if (viaEditor.ok) {
-          ctx.logger?.warn?.(
-            `dsh-waifu-agents: settings.update 走不通（${error?.message ?? error}），` +
-              `退回配置编辑器写默认——磁盘会变，但平台收不到通知，新任务页可能不跟。`,
-          );
-          return { ok: true, via: "configEditor" };
-        }
-        return {
-          ok: false,
-          error: `${error?.message ?? error}；改用配置编辑器也不行：${viaEditor.error}`,
-        };
-      }
-    }
-    const viaEditor = await editDefault({ configEditor, entry, id });
-    return viaEditor.ok ? { ok: true, via: "configEditor" } : viaEditor;
-  }
-
-  /**
-   * The pre-`settings` write path, kept only as a fallback.
-   *
-   * It cannot wake the app up — no `settings/document-updated` — which is
-   * exactly why it is no longer the first choice. It is still correct on disk.
-   *
-   * @param {{ configEditor: object, entry: object, id: string | null }} options
-   * @returns {Promise<{ ok: boolean, error?: string }>}
-   */
-  async function editDefault({ configEditor, entry, id }) {
-    try {
-      await configEditor.edit(entry, (current) => {
-        const copy = { ...(current ?? {}) };
-        if (id === null) delete copy.selectedDefault;
-        else copy.selectedDefault = id;
-        return copy;
-      });
-      return { ok: true };
-    } catch (error) {
-      return { ok: false, error: String(error?.message ?? error) };
-    }
-  }
-
-  /**
-   * Move the default off one id, and take the unstarted sessions with it.
-   *
-   * The counterpart of `setDefault` for the case where the id being named can no
-   * longer be used. The registry resolves the default at session creation —
-   * `get defaultId() { return this.config.selectedDefault.get() ?? this.config.default }`
-   * (`registry.js:494`) — and `retain()` throws
-   *
-   *     agent-preset/not-found: Unknown agent preset: <id>
-   *
-   * (`registry.js:643`, same in `resolve()` and `readDocument()`) when nothing
-   * holds it. So a dangling default is not a display problem that sorts itself
-   * out: it blocks EVERY new session, and the refusal comes from the service, so
-   * the composer's own `presets.find(p => p.isDefault)?.id ?? presets[0]?.id`
-   * fallback (`ui-agent-preset.js:1263`) never gets a chance to run.
-   *
-   * Same two steps as `setDefault`, for the same reasons: write through the
-   * settings service so the app re-reads the roster, confirm it by REREADING
-   * rather than by believing the write, and re-seat the blank sessions that were
-   * still following the id being dropped.
-   *
-   * @param {string} from the id the default is expected to hold right now
-   * @param {{ before?: object }} [context] a `refreshDefault({force:true})` the
-   *   caller already did, so this does not have to repeat the read
-   * @returns {Promise<{ ok: boolean, reason: string | null, skipped?: boolean,
-   *   nowDefault?: string | null, via?: string, moved?: string[], refused?: number }>}
-   */
-  async function moveDefaultOff(from, context = {}) {
-    const wanted = oneLine(from);
-    if (wanted === "")
-      return { ok: false, skipped: true, reason: "没有指定默认" };
-    const before = context.before ?? (await refreshDefault({ force: true }));
-    if (oneLine(before.id) !== wanted)
-      return { ok: false, skipped: true, reason: "默认已经不是它了" };
-    const configEditor = ctx.get("configEditor");
-    if (configEditor === undefined || configEditor === null)
-      return {
-        ok: false,
-        reason: "这个环境没有 configEditor 服务，改不了配置。",
-      };
-    let entry;
-    try {
-      entry = findRegistryEntry(configEditor);
-    } catch (error) {
-      return { ok: false, reason: `读不到配置项：${error.message ?? error}` };
-    }
-    if (entry === undefined)
-      return { ok: false, reason: `找不到 ${REGISTRY_PACKAGE} 这条配置项` };
-    const written = await writeDefault({ configEditor, entry, id: null });
-    if (!written.ok) return { ok: false, reason: `清不掉：${written.error}` };
-    const settled = await verifyDefault(null, {
-      previous: before.field,
-      checkable: before.field !== undefined,
-    });
-    if (!settled.verified && settled.checkable)
-      return {
-        ok: false,
-        reason: `写进去了，但读回来还是「${settled.id ?? "（没指定）"}」`,
-      };
-    /*
-     * The field decides what a session created LATER gets; this decides what the
-     * session already sitting on the new-task screen gets. Without it the blank
-     * session keeps the dead id its header was stamped with — a chip naming a
-     * wife that no longer exists, and a creation path that fails for the same
-     * reason the default did.
-     */
-    const resettled = await resettleUnstarted({
-      to: oneLine(cachedDefault.id),
-      from: wanted,
-    });
-    return {
-      ok: true,
-      reason: null,
-      nowDefault: cachedDefault.id,
-      via: written.via,
-      moved: resettled.moved,
-      refused: resettled.refused,
-    };
-  }
-
-  /**
-   * Clear a `selectedDefault` that names a preset nothing registers.
-   *
-   * Run from `status()` (so opening the panel heals), from the boot scan, and
-   * from `remove()`. Each of those is a moment where the default can be seen to
-   * be dead, and the failure it causes is the worst this plugin can produce:
-   * every new session refused with `agent-preset/not-found`, with nothing in the
-   * UI to explain it and nothing to click to get out.
-   *
-   * It only ever clears — never re-points at another wife. Choosing a persona on
-   * the user's behalf would be a different, louder decision than undoing a broken
-   * one, and the profile default is what the field falls back to.
-   *
-   * @returns {Promise<{ healed: string | null, from?: string, reason: string | null,
-   *   nowDefault?: string | null, moved?: string[], refused?: number, via?: string }>}
-   */
-  async function reconcileDefault() {
-    const before = await refreshDefault({ force: true });
-    const picked = oneLine(before.id);
-    if (picked === "")
-      return { healed: null, reason: "没指定默认" };
-    let rows;
-    try {
-      rows = await ctx.agentPresets.list();
-    } catch (error) {
-      return { healed: null, reason: `读不到名册：${error?.message ?? error}` };
-    }
-    if (!Array.isArray(rows)) return { healed: null, reason: "名册没回数组" };
-    /*
-     * An empty roster is 「还没人注册」, not 「谁都指不到」. A plugin that registers
-     * its presets after this row was applied would otherwise have its default
-     * cleared out from under it for no reason — and the cost of waiting is nil,
-     * because `status()` runs this again every time the panel opens.
-     */
-    if (rows.length === 0)
-      return { healed: null, reason: "名册还是空的，先不动" };
-    if (rows.some((row) => oneLine(row?.id) === picked))
-      return { healed: null, reason: "默认指的这个人设还在" };
-    const dropped = await moveDefaultOff(picked, { before });
-    if (!dropped.ok) {
-      // Say it out loud: a default that names nothing blocks every new session,
-      // and failing to repair it silently is exactly how this looked before —
-      // like nothing was wrong until the next new task refused to open.
-      ctx.logger?.warn?.(
-        `dsh-waifu-agents: 默认人设「${picked}」已经不在名册里了（新会话会被 ` +
-          `agent-preset/not-found 直接挡掉），可是清不掉它：${dropped.reason}`,
-      );
-      return { healed: null, from: picked, reason: dropped.reason };
-    }
-    const now = oneLine(dropped.nowDefault);
-    ctx.logger?.warn?.(
-      `dsh-waifu-agents: 默认人设「${picked}」已经不在名册里了（新会话会被 ` +
-        `agent-preset/not-found 直接挡掉），已清掉这条默认，新会话回落到` +
-        `${now === "" ? " profile 默认" : `「${now}」`}` +
-        (dropped.moved.length > 0
-          ? `，顺手把 ${dropped.moved.length} 个还没开口的会话也挪过去了。`
-          : "。"),
-    );
-    return {
-      healed: picked,
-      from: picked,
-      nowDefault: dropped.nowDefault,
-      moved: dropped.moved,
-      refused: dropped.refused,
-      via: dropped.via,
-      reason: null,
-    };
-  }
-
-  /** Point the registry's `selectedDefault` at one wife, or at nobody. */
-  async function setDefault(request) {
-    const id = String(request.id ?? "").trim();
-    // An empty id is 「谁都不指定」 — exactly what the settings row's 关掉 button
-    // and a switched-off roster row send. Refusing it is why turning the default
-    // off left the previous row's active border on screen behind an error note.
-    const clearing = id === "";
-    if (!clearing && !ID_OK.test(id))
-      return { ok: false, error: `id 不合法：${id}` };
-    /*
-     * Two kinds of preset can hold this field: a persona, and a TEAM — every
-     * team is registered as an agent preset (`runTeamPresetSync`), which is
-     * what puts it on the new-session page at all.
-     *
-     * Requiring a `.md` file made 「把这一队设成默认」 impossible: the id is
-     * real, the registry holds it, and the write was refused for naming no
-     * file. `teamPresets` is the authority for that half — not the 「团队-」
-     * prefix, which a persona file could legally carry.
-     */
-    if (!clearing && !teamPresets.has(id) && !fs.existsSync(fileFor(id)))
-      return { ok: false, error: `没有这个人设，也没有这个团队：${id}` };
-    const configEditor = ctx.get("configEditor");
-    if (configEditor === undefined || configEditor === null) {
-      return {
-        ok: false,
-        error: "这个环境没有 configEditor 服务，改不了默认人设。",
-      };
-    }
-    let entry;
-    try {
-      entry = findRegistryEntry(configEditor);
-    } catch (error) {
-      return { ok: false, error: `读不到配置项：${error.message ?? error}` };
-    }
-    if (entry === undefined)
-      return {
-        ok: false,
-        error: `找不到 ${REGISTRY_PACKAGE} 这条配置项（配置里现在有：${describeEntries(configEditor)}）`,
-      };
-    const before = await refreshDefault({ force: true });
-    /*
-     * Through the settings service, so the app is told (see `writeDefault`).
-     * `configEditor.edit()` alone lands the value and wakes nobody up, which is
-     * how the panel and the new-task chip ended up naming different wives.
-     */
-    const written = await writeDefault({
-      configEditor,
-      entry,
-      id: clearing ? null : id,
-    });
-    if (!written.ok)
-      return { ok: false, error: `写入失败：${written.error}` };
-    /*
-     * The write is not the truth; the reread is.
-     *
-     * `configEditor.edit()` settles the patch file before the Loader has
-     * re-activated the row, so a read issued right here can still answer with the
-     * PREVIOUS id. Believing the write at that point is what made the panel and
-     * the platform disagree: the roster kept the active border on the row the
-     * user had just moved the default off, and the next new task came up on the
-     * profile default instead. So confirm the write against the live registry
-     * before saying it moved, and say so out loud when it did not.
-     */
-    const wanted = clearing ? null : id;
-    const settled = await verifyDefault(wanted, {
-      previous: before.field,
-      checkable: before.field !== undefined,
-    });
-    if (!settled.verified && settled.checkable) {
-      return {
-        ok: false,
-        error: `写进去了，但读回来还是「${settled.id ?? "（没指定）"}」——这一行没能生效。再点一次；再不行就是这条配置被别处的 patch 覆盖了（profile 的 cordis.patch.yml 与 home patch / 命令行 --patch）。`,
-        id: wanted,
-        verified: false,
-        checkable: true,
-        attempts: settled.attempts,
-        defaultId: cachedDefault.id,
-      };
-    }
-    /*
-     * The write decides what a session created LATER gets. This decides what the
-     * session already on screen gets — the new-task chip the user is looking at
-     * while they do this. Both are needed; only the first was here.
-     */
-    const resettled = await resettleUnstarted({
-      to: oneLine(cachedDefault.id),
-      from: before.id,
-    });
-    if (resettled.moved.length > 0) {
-      ctx.logger?.info?.(
-        `dsh-waifu-agents: 默认改成 ${oneLine(cachedDefault.id)}，` +
-          `顺手把 ${resettled.moved.length} 个还没开口的会话挪过去（${resettled.moved.join("、")}）。`,
-      );
-    }
-    return {
-      ok: true,
-      id: wanted,
-      verified: settled.verified,
-      // `false` = this profile exposes neither `settings` nor an `isDefault`
-      // flag, so the write could not be confirmed either way. The panel says so
-      // instead of pretending the read agreed.
-      checkable: settled.checkable,
-      attempts: settled.attempts,
-      // The anchor this write committed, already read back from the live
-      // registry. The panel lands it after its reread, so a `list` that still
-      // answers with the previous id cannot leave the row the user just moved
-      // off wearing the active border.
-      defaultId: cachedDefault.id,
-      defaultSource: cachedDefault.source,
-      // How the write reached the config, and whether the blank sessions came
-      // along. Both are diagnostics for a report that says the panel and the
-      // new-task chip still disagree — they name which half is missing.
-      via: written.via,
-      resettled: resettled.moved,
-      resettleSkipped: resettled.reason,
-    };
-  }
-
-  /* ------------------------------------------------ self-update (the version trap) */
-
-  /**
-   * The plugin-manager service, when this profile has one.
-   *
-   * `ctx.get` alone is NOT enough, for the same reason the HTTP route needs
-   * `ctx.inject`: a strict `get` answers only while the providing fiber is
-   * ACTIVE, and the manager may still be starting when this plugin activates.
-   * `ctx.inject` starts a separate fiber the moment the service really exists.
-   * The direct lookups are the fallback for a profile that has no manager at all
-   * — there the op has to say so rather than silently do nothing.
-   * @returns {object | null}
-   */
-  let pluginManager = null;
-  ctx.inject(["pluginManager"], (scoped) => {
-    pluginManager = scoped.pluginManager ?? null;
-    scoped.effect(
-      () => () => {
-        pluginManager = null;
-      },
-      "waifu-agents: pluginManager handle",
-    );
+    },
+    markScanned: () => {
+      scannedOnce = true;
+    },
+    defaultCache: () => cachedDefault,
   });
 
-  function managerOf() {
-    if (pluginManager !== null) return pluginManager;
-    try {
-      return ctx.get("pluginManager", false) ?? null;
-    } catch {
-      return null;
-    }
-  }
-
-  /** The last part of a package-manager log, bounded, for a panel one-liner. */
-  function tail(value, limit = 2000) {
-    const text = String(value ?? "").trim();
-    return text.length <= limit ? text : `…${text.slice(-limit)}`;
-  }
-
-  /**
-   * The installation this plugin started, and what the platform has said about
-   * it since. One at a time on purpose: `installBundle` takes a profile-wide
-   * lock, so a second start would only queue behind the first while the panel
-   * drew two bars and neither of them moved.
-   *
-   * @type {{ requestId: string, version: string, previous: string | null,
-   *   startedAt: number, phase: string, attempt: object | null, log: string,
-   *   logTruncated: boolean, pnpmExit: number | null, seenFeed: boolean,
-   *   warnedNoFeed: boolean, done: boolean, result: object | null,
-   *   error: string | null } | null}
-   */
-  let activeInstall = null;
-
-  /** How much pnpm output to keep. The panel draws a tail, not a transcript. */
-  const INSTALL_LOG_LIMIT = 4000;
-
-  /**
-   * Fold an announced phase into the running install.
-   *
-   * The platform emits `plugin-manager/install-state` from the manager's own
-   * context, and ONLY when the caller passed a `requestId`:
-   *
-   *     const announce = (phase, attempt) => {
-   *       if (requestId !== void 0) this.ownerContext.emit(...)
-   *     }
-   *
-   * which is the whole reason `updateApply` mints one. Without it the install
-   * runs to completion in total silence, and that silence is exactly the
-   * 「装完了也不知道装完没有」 this feed exists to answer.
-   *
-   * Phases seen in the manager's source: `installing` (once per registry the
-   * installation asks, carrying `{registry, index, total}`), `applying` (the
-   * config write and reload, announced once), `cancelling` (only if someone
-   * asked to stop it — this plugin never does).
-   */
-  function noteInstallState(progress) {
-    const job = activeInstall;
-    if (job === null || oneLine(progress?.requestId) !== job.requestId) return;
-    const phase = oneLine(progress?.phase);
-    if (phase !== "") job.phase = phase;
-    const attempt = progress?.attempt;
-    if (attempt !== undefined && attempt !== null) {
-      job.attempt = {
-        registry: oneLine(attempt.registry),
-        index: Number(attempt.index ?? 0),
-        total: Number(attempt.total ?? 0),
-      };
-    }
-    job.seenFeed = true;
-  }
-
-  /**
-   * Append one pnpm chunk, keeping only the tail the panel will draw.
-   *
-   * A chunk carries `{requestId, jobId, argv, cwd, stream, text, exitCode}`;
-   * the last one for a command arrives with empty `text` and the exit code.
-   * The accumulation is NOT `tail(log + text)` — that helper trims, and
-   * trimming a still-running log would eat the newline boundaries and glue two
-   * unrelated lines together.
-   */
-  function noteInstallLog(chunk) {
-    const job = activeInstall;
-    if (job === null || oneLine(chunk?.requestId) !== job.requestId) return;
-    const text = String(chunk?.text ?? "");
-    if (text !== "") {
-      const joined = job.log + text;
-      if (joined.length > INSTALL_LOG_LIMIT) {
-        job.logTruncated = true;
-        job.log = joined.slice(-INSTALL_LOG_LIMIT);
-      } else {
-        job.log = joined;
-      }
-    }
-    if (chunk?.exitCode !== undefined && chunk?.exitCode !== null) {
-      job.pnpmExit = Number(chunk.exitCode);
-    }
-    job.seenFeed = true;
-  }
+  /* ------------------------------------------------ 自更新（版本陷阱） */
 
   /*
-   * The platform's own install telemetry, published for whoever asks — its own
-   * Plugins page listens to this same pair through `ctx.remote.$on`
-   * (`ui-plugin-manager`). Subscribing costs nothing while nothing is
-   * installing: both handlers return on their first line unless the id matches
-   * the job this plugin started, and this plugin starts at most one at a time.
+   * 检查、tarball 安装和进度推送现在都住在 `self-update.js`。留在这里的是它
+   * 无法拥有的唯一一件事：这一行询问的是哪个注册表。它以 thunk 的形式交接，
+   * 因为 `config` 是行自己的 schema 对象，插件运行期间面板可能把行指向别处。
    */
-  ctx.on("plugin-manager/install-state", noteInstallState);
-  ctx.on("plugin-manager/install-log", noteInstallLog);
+  const updater = installSelfUpdate(ctx, {
+    registryOf: () => config.registry,
+  });
+
 
   /**
-   * Running version, installed version, published version.
-   *
-   * All three are needed because they can all differ: `pnpm add` swaps the file
-   * on disk while the old module keeps running, so "installed" and "running"
-   * disagree exactly between an update and the restart that applies it.
-   */
-  async function updateCheck() {
-    // Read the disk ONCE: two reads could straddle a running install and report
-    // a version that never existed.
-    const installed = readOwnVersion();
-    let latest = null;
-    let registry = null;
-    let error = null;
-    try {
-      const found = await latestVersion(config.registry);
-      latest = found.version;
-      registry = found.registry;
-    } catch (failure) {
-      // A registry that cannot be reached is not a failed op: the panel still
-      // wants to show which version is installed, and offline is normal.
-      error = String(failure?.message ?? failure);
-    }
-    return {
-      ok: true,
-      name: PACKAGE_NAME,
-      running: RUNNING_VERSION,
-      installed,
-      latest,
-      registry,
-      // Judged against what is on DISK: the banner has to go away the moment the
-      // new version is installed, even though the old one keeps running.
-      updateAvailable:
-        latest !== null && isNewer(latest, installed ?? RUNNING_VERSION),
-      // Judged against what is RUNNING, which is the only thing a restart changes.
-      restartPending:
-        installed !== null &&
-        RUNNING_VERSION !== null &&
-        installed !== RUNNING_VERSION,
-      canInstall: managerOf() !== null,
-      error,
-    };
-  }
-
-  /**
-   * Install the newest published version, through the same service the Plugins
-   * page uses.
-   *
-   * The exact version is passed, never a range. The spec it installs FROM
-   * depends on what is already on disk (see the comment at the choice below):
-   * an update goes through the new version's tarball URL — the spec shape the
-   * HMR precheck cannot refuse — and a fresh install keeps the plain
-   * `name@version`, whose install rewrites the profile's declared range.
-   *
-   * `minimumReleaseAge`: a registry-name install is subject to the 24h
-   * freshness policy and must be recorded in the workspace's
-   * `minimumReleaseAgeExclude` first, or the lockfile check refuses outright
-   * with `ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION`. A tarball URL install
-   * fetches the package file directly and plausibly never consults publish
-   * times — expected but NOT verified against the manager's pnpm invocation,
-   * so the failure, should it come, is surfaced verbatim rather than promised
-   * away.
-   *
-   * Returns as soon as the install is STARTED, not when it finishes, and hands
-   * back the `requestId` that makes the platform publish progress for it. The
-   * panel then polls `updateProgress` — see the comment on the launch below for
-   * why holding this response open was the wrong shape.
-   */
-  async function updateApply(request) {
-    const manager = managerOf();
-    if (manager === null) {
-      return {
-        ok: false,
-        error: `这个环境没有 pluginManager 服务，装不了；请在插件页手动安装 ${PACKAGE_NAME}@latest。`,
-      };
-    }
-    /*
-     * One at a time. `installBundle` serialises on a profile-wide lock anyway,
-     * so a second call would only wait in that queue — while the panel, told
-     * 「started」, drew a bar that never moved. Naming the running one is more
-     * use than pretending to start another.
-     */
-    if (activeInstall !== null && activeInstall.done !== true) {
-      return {
-        ok: false,
-        error: "上一次更新还在进行，等它结束再试。",
-        requestId: activeInstall.requestId,
-        running: true,
-      };
-    }
-    let version = String(request.version ?? "").trim();
-    try {
-      if (version === "")
-        version = (await latestVersion(config.registry)).version;
-    } catch (failure) {
-      return {
-        ok: false,
-        error: `查不到最新版本：${failure?.message ?? failure}`,
-      };
-    }
-    if (!/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(version)) {
-      return { ok: false, error: `版本号不合法：${version}` };
-    }
-    const before = readOwnVersion();
-    if (before === version) {
-      /*
-       * Nothing to install, and said in the shape the panel already draws a
-       * FINISHED job in — so 「已经是最新的」 lands in the same progress window
-       * as a real install instead of needing a second code path in the client.
-       */
-      return {
-        ok: true,
-        started: false,
-        requestId: "",
-        version,
-        previous: before,
-        done: true,
-        result: {
-          ok: true,
-          version,
-          previous: before,
-          application: "current",
-          changed: false,
-          installed: before,
-          log: "",
-        },
-      };
-    }
-    /*
-     * Which spec to install from, decided by what is already on disk.
-     *
-     * An UPDATE of an installed package installs from the new version's
-     * tarball URL: that is the one spec shape the HMR precheck cannot match by
-     * name, so it reaches pnpm over the installed copy and the re-composition
-     * replaces the running plugin in place — no removal, no fiber gamble. It
-     * also rewrites the profile's saved dependency from a version range to the
-     * exact URL, which is deliberate: the next update's URL differs again, so
-     * no future install is ever refused as already-installed.
-     *
-     * A FRESH install (nothing readable on disk) keeps the registry name:
-     * there is nothing installed for the precheck to refuse, and the saved
-     * spec stays a plain dependency. If that judgement is wrong — the copy on
-     * disk was unreadable, not absent — the name spec is refused with
-     * `already-installed` and the two-step below takes over.
-     */
-    let spec = `${PACKAGE_NAME}@${version}`;
-    if (before !== null) spec = await tarballUrlOf(config.registry, version);
-    /*
-     * The id is minted here, or accepted from the panel when it sent one. It
-     * exists because the platform publishes progress ONLY for an installation
-     * that carries one (`noteInstallState`). The panel prefers to mint it
-     * itself: a chunk that arrives before this response comes back still finds
-     * the job it belongs to. The fallback keeps a direct caller (a script, or
-     * `curl` against this route) working just as well.
-     */
-    const requestId = String(request.requestId ?? "").trim() || randomUUID();
-    const job = {
-      requestId,
-      version,
-      previous: before,
-      startedAt: Date.now(),
-      phase: "starting",
-      attempt: null,
-      log: "",
-      logTruncated: false,
-      pnpmExit: null,
-      seenFeed: false,
-      warnedNoFeed: false,
-      done: false,
-      result: null,
-      error: null,
-    };
-    activeInstall = job;
-    /*
-     * Deliberately NOT awaited: pnpm can take a minute, and holding this HTTP
-     * response open for the whole of it is exactly what made 「到底装完了没有」
-     * unanswerable — the panel had one blocking call and nothing to draw until
-     * it returned. The install carries on here while the panel polls
-     * `updateProgress`, which keeps answering with the final result after the
-     * job settles.
-     */
-    void (async () => {
-      try {
-        const outcome = await manager.installBundle(spec, {
-          enabled: true,
-          requestId,
-        });
-        if (outcome?.application === "failed") {
-          /*
-           * The tarball spec should never be refused with `already-installed`
-           * (its package name is only known after pnpm runs), and a fresh
-           * install has nothing installed to refuse. Landing here anyway
-           * means the manager named the installed package from the spec
-           * after all, or the disk judgement above was wrong — either way the
-           * documented cross-version path is remove-then-install, and the
-           * fiber that awaited the removal is never interrupted by the
-           * resolution itself, so this fallback performs the two-step right
-           * here: remove, then install the new version from the same fiber
-           * under its plain registry name. Whether the host lets the fiber
-           * survive its own removal is what real-machine use finds out; every
-           * way it can die is caught below and reported with the manual path
-           * as the last resort. Nothing here can touch user data — personas
-           * and teams.json are outside the package.
-           */
-          const code = String(outcome.error?.code ?? outcome.error?.message ?? "");
-          if (code.includes("already-installed")) {
-            ctx.logger?.warn?.(
-              `dsh-waifu-agents: installBundle refused ${version} (already-installed); performing remove-then-install.`,
-            );
-            job.phase = "removing";
-            try {
-              await manager.removeBundle(PACKAGE_NAME);
-            } catch (removeFailure) {
-              job.done = true;
-              job.error = `卸载旧版本失败（${removeFailure?.message ?? removeFailure}），已安装的版本没有变动。请到「插件」页手动卸载后重新安装 ${version}。`;
-              return;
-            }
-            /*
-             * Still running — the fiber survived its own removal. The spec no
-             * longer names an installed package, so the precheck lets the new
-             * version through to pnpm.
-             */
-            job.phase = "reinstalling";
-            let retry = null;
-            try {
-              retry = await manager.installBundle(`${PACKAGE_NAME}@${version}`, {
-                enabled: true,
-                requestId,
-              });
-            } catch (installFailure) {
-              job.done = true;
-              job.error = `旧版本已卸载，但安装 ${version} 失败：${installFailure?.message ?? installFailure}。请到「插件」页重新安装——人设目录（personas）和团队配置（teams.json）不在包里，不受影响。`;
-              return;
-            }
-            if (retry?.application === "failed") {
-              job.done = true;
-              job.error = `旧版本已卸载，但安装 ${version} 失败：${retry.error?.message ?? retry.error?.code ?? JSON.stringify(retry.error)}。请到「插件」页重新安装——人设目录（personas）和团队配置（teams.json）不在包里，不受影响。`;
-              if (job.log === "") job.log = String(retry?.packageResult?.output ?? "");
-              return;
-            }
-            job.done = true;
-            job.result = {
-              ok: true,
-              version,
-              previous: before,
-              application: retry?.application ?? null,
-              changed: retry?.changed === true,
-              installed: readOwnVersion(),
-              log: String(retry?.packageResult?.output ?? ""),
-              twoStep: true,
-            };
-            return;
-          }
-          job.done = true;
-          job.error = `安装失败：${outcome.error?.message ?? outcome.error?.code ?? JSON.stringify(outcome.error)}`;
-          // The manager's own transcript is the useful half of this failure,
-          // and it is only here if the streaming feed never spoke.
-          if (job.log === "") job.log = String(outcome?.packageResult?.output ?? "");
-          return;
-        }
-        job.done = true;
-        job.result = {
-          ok: true,
-          version,
-          previous: before,
-          // Without HMR this is `restart-required`; with HMR a fresh install
-          // (the two-step above included) may genuinely apply. The manager's
-          // own word is passed through rather than a promise this code cannot
-          // keep.
-          application: outcome?.application ?? null,
-          changed: outcome?.changed === true,
-          installed: readOwnVersion(),
-          log: String(outcome?.packageResult?.output ?? ""),
-        };
-      } catch (failure) {
-        job.done = true;
-        job.error = `调用 pluginManager 失败：${failure?.message ?? failure}`;
-      }
-    })();
-    return { ok: true, started: true, requestId, version, previous: before };
-  }
-
-  /**
-   * What the panel draws while it waits.
-   *
-   * Plain data on purpose: the panel polls this over HTTP, and a job that has
-   * already finished KEEPS answering with its result until the next install
-   * replaces it — so a poll that lands after the last chunk sees the outcome
-   * instead of racing it into 「idle」.
-   */
-  function updateProgress(request) {
-    const job = activeInstall;
-    const wanted = String(request?.requestId ?? "").trim();
-    if (job === null || (wanted !== "" && wanted !== job.requestId)) {
-      return { ok: true, idle: true, requestId: wanted === "" ? null : wanted };
-    }
-    const elapsed = Date.now() - job.startedAt;
-    /*
-     * Warn once if the platform's feed never answers while the install is
-     * clearly running. That is the only way this plugin can fail to see
-     * progress — the events are emitted on the manager's own context, so a
-     * build that scoped them somewhere else would leave the bar sitting on
-     * 「准备中」 while pnpm worked. The panel says as much in words; this line is
-     * what a log reader gets.
-     */
-    if (
-      job.done !== true &&
-      job.seenFeed !== true &&
-      job.warnedNoFeed !== true &&
-      elapsed > 8000
-    ) {
-      job.warnedNoFeed = true;
-      ctx.logger?.warn?.(
-        `dsh-waifu-agents: 更新已经跑了 ${Math.round(elapsed / 1000)} 秒，但一直没收到 plugin-manager 的进度事件；进度条只能显示「进行中」。`,
-      );
-    }
-    return {
-      ok: true,
-      idle: false,
-      requestId: job.requestId,
-      version: job.version,
-      previous: job.previous,
-      phase: job.phase,
-      attempt: job.attempt,
-      elapsedMs: elapsed,
-      // The streamed transcript wins; the manager's returned output is the
-      // fallback for a run that never streamed (an older manager, or a feed
-      // this build does not publish).
-      log: job.log !== "" ? job.log : String(job.result?.log ?? ""),
-      logTruncated: job.logTruncated,
-      pnpmExit: job.pnpmExit,
-      seenFeed: job.seenFeed,
-      done: job.done,
-      result: job.result,
-      error: job.error,
-    };
-  }
-
-  /**
-   * The live roster. This is the only way to see whether a wife actually
-   * mounted: `register()` reports an activation failure as `broken` on the
-   * record instead of removing it, so "the file exists" never proves "the
-   * preset works".
+   * 活跃花名册。这是看清一个 wife 是否真的挂载了的唯一办法：`register()`
+   * 把激活失败作为 `broken` 记在记录上而不是移除它，所以"文件存在"永远证明
+   * 不了"预设能用"。
    */
   async function roster() {
     try {
-      // Same reason as `status()`: a reader that answers from the cache can mark
-      // the wrong row as the default, and this is the face that draws the border.
+      // 与 `status()` 同理：从缓存作答的读取端可能把错误的行标成默认，
+      // 而这正是画激活边框的那个面。
       await refreshDefault();
       const presets = await ctx.agentPresets.list();
       return {
@@ -5399,24 +3141,22 @@ export function apply(ctx, config = {}) {
         defaultId: cachedDefault.id,
         defaultSource: cachedDefault.source,
         defaultError: cachedDefault.error,
-        // Does the persisted default name a preset this registry actually holds?
+        // 持久化的默认指名的是这个注册表真的持有的预设吗？
         //
-        // This used to be written down as 「悄悄落到列表第一项」, quoting the
-        // composer's own `fallback = presets.find(p => p.isDefault)?.id ??
-        // presets[0]?.id ?? ""` (`ui-agent-preset.js:1263`). That is the
-        // RENDERER's fallback and it is never reached: the service resolves the
-        // default first, and `retain()` throws
-        // `agent-preset/not-found: Unknown agent preset: <id>` (`registry.js:643`).
-        // So a dangling default does not degrade to the first row — it blocks
-        // EVERY new session outright, with the panel nowhere in the picture and no
-        // row to click. The flag stays; what it means is 「新会话会直接失败」, and
-        // `reconcileDefault()` now clears it instead of only reporting it.
+        // 这里过去写成「悄悄落到列表第一项」，引用的是 composer 自己的
+        // `fallback = presets.find(p => p.isDefault)?.id ??
+        // presets[0]?.id ?? ""`（`ui-agent-preset.js:1263`）。那是渲染器的
+        // 后备，而且永远走不到：服务先解析默认，`retain()` 抛出
+        // `agent-preset/not-found: Unknown agent preset: <id>`（`registry.js:643`）。
+        // 所以悬空的默认不会降级到第一行——它直接挡死每一个新会话，面板根本
+        // 不在局中，也没有行可点。标志保留；它的含义是「新会话会直接失败」，
+        // 而且 `reconcileDefault()` 现在会清掉它，而不只是上报。
         //
-        // `null` when no face named a default at all: that means 「不知道」, not
-        // 「指不到人」. Reporting `false` there would accuse a profile that simply
-        // has nothing set — and `readDefaultId` resolves the registry's own
-        // `selectedDefault ?? config.default` fallback through the roster faces
-        // anyway, so a real default is normally never `null`.
+        // 没有任何面指名默认时为 `null`：那意味着「不知道」，不是
+        // 「指不到人」。在那里报 `false` 会冤枉一个只是什么都没设的 profile
+        // ——何况 `readDefaultId` 本来就经由花名册面解析注册表自己的
+        // `selectedDefault ?? config.default` 后备，真正的默认通常不会是
+        // `null`。
         defaultResolves:
           cachedDefault.id === null
             ? null
@@ -5435,8 +3175,8 @@ export function apply(ctx, config = {}) {
   }
 
   /**
-   * What the picker needs: the roster, the global default, and this session's
-   * current answer. `active` marks the row the session actually resolves to.
+   * 选择器需要的东西：花名册、全局默认，以及本会话当前的答案。`active`
+   * 标出会话实际解析到的那一行。
    */
   async function waifuState(request) {
     const sessionId = oneLine(request.sessionId);
@@ -5454,9 +3194,9 @@ export function apply(ctx, config = {}) {
         description: item.description,
         isDefault: cachedDefault.id === item.id,
       }))
-      // The sort belongs to the ARRAY. Chaining `.sort` inside `.map` sorted one
-      // row object's own keys — objects have no `.sort`, so every call to this op
-      // threw and the picker listed nothing.
+      // 排序属于这个数组。把 `.sort` 接在 `.map` 里面排的是一个行对象自己的
+      // 键——对象没有 `.sort`，于是这个 op 的每次调用都抛错，选择器什么也
+      // 列不出来。
       .sort(
         (a, b) =>
           orderOf(a) - orderOf(b) ||
@@ -5478,760 +3218,142 @@ export function apply(ctx, config = {}) {
     };
   }
 
-  /* ------------------------------------------------------------- team mode */
+  /* ------------------------------------------------------------- 团队模式 */
 
-  /**
-   * Team mode, as the panel sees it — the **directory** half only.
-   *
-   * The feature has two halves that must never be conflated (design doc §6): the
-   * teams written in `teams.json`, and which of them one session is on. The
-   * settings panel can only ever see the first one, and that is a property of
-   * the platform rather than a choice: `SettingsPluginsTabOwnerProps` is an
-   * empty type, so no session id ever reaches the panel (see the header note in
-   * `client.js`). A panel that offered "bind this session" would be guessing at
-   * a session it cannot name. So it edits the file, and `/waifu-team` — which
-   * runs *inside* a session and therefore knows which one — does the binding.
-   *
-   * What this op adds over reading the file is that every stored team is
-   * resolved live against the persona directory: the panel shows what the name
-   * points at *today*, including a member a deleted persona quietly took with
-   * it, instead of echoing back the selection that was typed months ago.
+  /*
+   * 团队模式的面板目录（teamState / teamSet / teamMemoryClear）已搬进
+   * `team-mode.js`。这里只保留接线：闭包句柄按值递进去；`choosableRows`
+   * 住在 memory-ops，其安装在本调用之后，所以走惰性 thunk（调用发生在
+   * apply() 完成之后，绑定那时早已就位）。
    */
-  async function teamState() {
-    if (teamRuntime === null) {
-      return { ok: false, error: "团队运行时还没装上，这个会话看不到团队。" };
-    }
-    await refreshDefault();
-    const store = teamRuntime.store();
-    const teams = [];
-    for (const entry of store.teams) {
-      const preview = teamRuntime.preview(entry.name);
-      teams.push({
-        name: entry.name,
-        /*
-         * The preset id this team is registered under, or `""` when it is not
-         * one (the sync is still in flight, or it failed — see
-         * `runTeamPresetSync`).
-         *
-         * The panel needs it for one reason: `selectedDefault` holds a PRESET
-         * id, and a team's id is derived from its name, so without this field
-         * the team tab cannot tell whether the switch it is drawing is the one
-         * that is actually on. It is also what the switch writes — the same
-         * field the persona rows write, because the platform only has one.
-         */
-        presetId: teamPresetIdByName(entry.name),
-        selection: entry.selection,
-        roles: entry.roles,
-        writeScope: entry.writeScope,
-        // Shipped back so the editor can show what the team already carries: a
-        // field the panel writes but never reads would be wiped the first time
-        // somebody opens an entry to rename it.
-        background: entry.background,
-        // No `thinking` row. There is one way a team talks; shipping the old
-        // field back to the client would invite it to render a dead control.
-        lastResolved: entry.lastResolved,
-        lastResolvedAt: entry.lastResolvedAt,
-        preview:
-          preview.ok !== true
-            ? {
-                ok: false,
-                error: preview.error ?? "解析失败。",
-                hint: preview.hint ?? [],
-                notices: preview.notices ?? [],
-                members: [],
-              }
-            : {
-                ok: true,
-                single: preview.single === true,
-                members: (preview.members ?? []).map((row) => ({ id: row.id, name: row.name })),
-                removed: preview.removed ?? [],
-                truncated: (preview.truncated ?? []).map((row) => row.name),
-                notices: preview.notices ?? [],
-                drift: preview.drift ?? { added: [], removed: [], comparable: false },
-                capacity: preview.capacity ?? { max: null, policy: "refuse" },
-              },
-      });
-    }
-    return {
-      ok: true,
-      teams,
-      /*
-       * Which preset the new-session default names right now — the same value
-       * `status()` reports, shipped here too so the team tab draws its switch
-       * from the payload it already has. `refreshDefault()` above is what makes
-       * this a read of the live registry rather than of our own last write.
-       */
-      defaultId: cachedDefault.id,
-      defaultSource: cachedDefault.source,
-      groups: teamRuntime.groups(),
-      batch: { maxTeamSize: store.maxTeamSize, groupCapPolicy: store.groupCapPolicy },
-      // `thinkingModes` used to be advertised here so the panel could offer
-      // "stage / ventriloquist". There is one way a team talks now, so the
-      // option is gone rather than hidden — a client that still asks for it
-      // must not silently render a control that does nothing.
-      policies: CAP_POLICIES,
-      problem: storeProblem(store),
-      // The member picker needs the tag as well as the name: picking a group is
-      // picking whoever carries that tag, and a row that hides it makes the
-      // resulting "3 人" look arbitrary.
-      rows: choosableRows().map((row) => {
-        const full = listFiles().find((item) => item.id === row.id);
-        return { id: row.id, name: row.name, group: oneLine(full?.group) };
-      }),
-    };
-  }
+  const {
+    teamState,
+    teamSet,
+    teamMemoryClear,
+  } = installTeamMode(ctx, {
+    oneLine,
+    CAP_POLICIES,
+    NAME_LIMIT,
+    TEAM_LIMIT,
+    adoptTeam,
+    defaultNamesTeam,
+    defaultRenameFollow,
+    expandSelection,
+    saveTarget,
+    storeProblem,
+    refreshDefault,
+    listFiles,
+    moveDefaultOff,
+    repointDefault,
+    syncTeamPresets,
+    teamPresetIdByName,
+    choosableRows: (...args) => choosableRows(...args),
+    teamRuntime: () => teamRuntime,
+    cachedDefault: () => cachedDefault,
+  });
+  /* --------------------------------------------- 人设长期记忆 ops */
 
-  /**
-   * Write the directory. Never the binding.
-   *
-   * There is deliberately no `bind` action here (see `teamState`): the panel
-   * cannot name a session, so a bind op would be reachable only by a caller
-   * that already has one — and that caller is the `/waifu-team` command, which
-   * goes through `teamRuntime.bind()` directly. An HTTP action nothing can
-   * legitimately call is a surface that will eventually be called wrongly.
-   *
-   * Every write is rolled back in memory when the file write fails, so the
-   * panel can never end up showing a team the file does not have.
+  /*
+   * 人设长记忆与 memory / team / purge 这些 op 的实现在 `memory-ops.js`。
+   * 安装点放在 panel-ops 的解构与 updater 之后：它们依赖 roster、
+   * setDefault、writeDefault 这些晚于旧安装位置初始化的绑定。返回值供
+   * 两处使用：写入路径（refreshMemorySnapshot）与下面的 `run` 分发器。
    */
-  async function teamSet(request) {
-    if (teamRuntime === null) {
-      return { ok: false, error: "团队运行时还没装上，这个会话看不到团队。" };
-    }
-    const action = oneLine(request.action);
-
-    if (action === "save") {
-      const name = oneLine(request.name).slice(0, NAME_LIMIT);
-      if (name === "") return { ok: false, error: "团队得有一个名字。" };
-      /*
-       * `original` is the name the editor was opened with (see `saveTarget`).
-       * Without it a rename is indistinguishable from a create, and the panel's
-       * "edit this team" ended up adding a second team under the new name while
-       * leaving the old one in place.
-       */
-      const original = oneLine(request.original).slice(0, NAME_LIMIT);
-      const store = teamRuntime.store();
-      const target = saveTarget(store.teams, name, original);
-      if (target.error !== null) return { ok: false, error: target.error };
-      const at = target.at;
-      if (at < 0 && store.teams.length >= TEAM_LIMIT) {
-        return { ok: false, error: `最多存 ${TEAM_LIMIT} 个团队，先删掉几个。` };
-      }
-      const before = at < 0 ? null : store.teams[at];
-      /*
-       * Merge over the stored entry instead of replacing it. The panel's editor
-       * only sends `selection` and `background`, so a plain replace would drop
-       * `roles` / `writeScope` / `lastResolved` on every rename — a rename must
-       * not cost the team its role sentences.
-       */
-      const entry = adoptTeam(name, before === null ? (request.team ?? {}) : { ...before, ...(request.team ?? {}) });
-      /*
-       * A team is two voices or it is not a team.
-       *
-       * This used to accept one entry and let the runtime fall back to single
-       * mode, which read as "the team is running" while one persona answered
-       * alone. The rule is now enforced where the user can still fix it: the
-       * selection is expanded against the LIVE directory, so a group that
-       * happens to hold one member is caught here too, not just an obviously
-       * short list.
-       */
-      const expanded = expandSelection({
-        selection: entry.selection,
-        roster: listFiles(),
-        strict: false,
-      });
-      if (expanded.unknownGroups.length > 0) {
-        return {
-          ok: false,
-          error: `组「${expanded.unknownGroups.join("、")}」找不到任何成员，检查一下名字或先给成员打上这个组标签。`,
-        };
-      }
-      if (expanded.members.length < 2) {
-        const dropped = expanded.removed.map((row) => row.name).join("、");
-        return {
-          ok: false,
-          error:
-            `团队至少要两个人，现在只解析到 ${expanded.members.length} 个。` +
-            (dropped === "" ? "" : `（${dropped} 选不进来：不在目录里或组装不出来。）`),
-        };
-      }
-      if (at < 0) store.teams.push(entry);
-      else store.teams[at] = entry;
-      if (teamRuntime.save() !== true) {
-        if (at < 0) store.teams.pop();
-        else store.teams[at] = before;
-        return { ok: false, error: `写 ${TEAM_FILE} 失败，改动没有生效。` };
-      }
-      /*
-       * Sessions bound to the old name have to follow it, or a rename silently
-       * takes every live session off the team — they would keep resolving a
-       * name that no longer exists and report "团队不在文件里了" instead.
-       */
-      if (target.renamed === true) teamRuntime.rename(original, name);
-      /*
-       * The preset ids are read from the live map on both sides of the sync:
-       * the old one only exists until it is rewritten below, the new one only
-       * after. A team preset id is derived from the team name, so a rename
-       * changes it — and a default that named the old id is left pointing at
-       * nothing, which refuses EVERY new session with
-       * `agent-preset/not-found` rather than degrading to a stale label.
-       */
-      const oldPreset = target.renamed === true ? teamPresetIdByName(original) : "";
-      await syncTeamPresets();
-      const newPreset = target.renamed === true ? teamPresetIdByName(name) : "";
-      /*
-       * `cachedDefault` is read fresh here: the registry is the authority, and a
-       * 2-second-old cache is exactly the window a rename lands in. The decision
-       * itself is `team.js`'s (`defaultRenameFollow`), so it can be tested
-       * without a host — the id comparison is the part that is easy to get
-       * wrong, and a boolean computed inline was not coverable at all.
-       */
-      const held = (await refreshDefault({ force: true })).id;
-      const follow = defaultRenameFollow({ defaultId: held, from: oldPreset, to: newPreset });
-      const defaultFollowed = follow === null ? "unchanged" : await repointDefault(follow.from, follow.to);
-      /*
-       * A repoint that did not land leaves the field naming an id nothing
-       * registers, and the consequence is out of proportion to its cause: every
-       * new session is refused. The panel has no room to say this (the toast is
-       * 「已保存」), so the log does — same rule as the `configEditor` degrade in
-       * `writeDefault`.
-       */
-      if (defaultFollowed === "failed")
-        ctx.logger?.warn?.(
-          `dsh-waifu-agents: 团队「${name}」改名后默认没跟上（${oldPreset} → ${newPreset}），` +
-            "新会话可能起不来（agent-preset/not-found）。去「设置 → Agent Presets」重选一次默认。",
-        );
-      return { ok: true, action, created: before === null, renamed: target.renamed, defaultFollowed, state: await teamState() };
-    }
-
-    if (action === "remove") {
-      const name = oneLine(request.name);
-      const store = teamRuntime.store();
-      const at = store.teams.findIndex((item) => item.name === name);
-      if (at < 0) return { ok: false, error: `没有叫「${name}」的团队。` };
-      const gone = store.teams.splice(at, 1)[0];
-      if (teamRuntime.save() !== true) {
-        store.teams.splice(at, 0, gone);
-        return { ok: false, error: `写 ${TEAM_FILE} 失败，没删掉。` };
-      }
-      /*
-       * Deleting a team has to unbind the sessions that were on it, or the
-       * deletion is only half done: a binding left behind resolves to an error
-       * on every assembly, so the session sits in team mode forever with
-       * nothing to run. The only other way out is switching persona, and the
-       * user has no reason to know they need it.
-       */
-      /*
-       * Two things have to be dropped, not one. `forget` clears the bindings;
-       * unregistering the preset is what stops sessions that were BORN on this
-       * team from being a team session any more — their own preset id still
-       * names it, and without this they would keep resolving against a team
-       * that no longer exists.
-       */
-      const unbound = teamRuntime.forget(name);
-      const gonePreset = teamPresetIdByName(name);
-      await syncTeamPresets();
-      /*
-       * …and the third thing: the global default, when it names this team's
-       * preset. Deleting a team whose preset IS the default would leave the
-       * field naming an id nothing registers — every new session refused, with
-       * no row left to click to get out. `moveDefaultOff` skips (with a reason)
-       * when the default was somebody else, and it re-seats the blank sessions
-       * that were still following this id.
-       */
-      const held = (await refreshDefault({ force: true })).id;
-      const defaultCleared = defaultNamesTeam({ defaultId: held, presetId: gonePreset })
-        ? await moveDefaultOff(gonePreset)
-        : null;
-      // Same rule as the rename above: a clear that did not land leaves a
-      // default naming an id nothing registers, and nothing on screen can say so.
-      if (defaultCleared !== null && defaultCleared.ok !== true && defaultCleared.skipped !== true)
-        ctx.logger?.warn?.(
-          `dsh-waifu-agents: 删掉团队「${name}」时全局默认没清掉（${defaultCleared.reason ?? ""}），` +
-            "新会话可能起不来（agent-preset/not-found）。去「设置 → Agent Presets」重选一次默认。",
-        );
-      return { ok: true, action, unbound, defaultCleared: defaultCleared === null ? null : defaultCleared.ok, state: await teamState() };
-    }
-
-    if (action === "batch") {
-      const store = teamRuntime.store();
-      const before = { maxTeamSize: store.maxTeamSize, groupCapPolicy: store.groupCapPolicy };
-      /*
-       * `batch` is a partial update, so an omitted field means "leave it", not
-       * "clear it" — the panel sends only what the user touched. Clearing the
-       * cap has its own spelling: an explicit `null` (or an empty string, which
-       * is what an emptied number input posts).
-       */
-      if (request.maxTeamSize === null || request.maxTeamSize === "") {
-        store.maxTeamSize = null;
-      } else if (request.maxTeamSize !== undefined) {
-        const cap = Number(request.maxTeamSize);
-        if (!Number.isSafeInteger(cap) || cap < 2) {
-          return {
-            ok: false,
-            error: "上限要么留空（不设限），要么是不小于 2 的整数。一个人的队不该走团队模式。",
-          };
-        }
-        store.maxTeamSize = cap;
-      }
-      if (request.groupCapPolicy !== undefined) {
-        const policy = oneLine(request.groupCapPolicy);
-        if (!CAP_POLICIES.includes(policy)) {
-          store.maxTeamSize = before.maxTeamSize;
-          return { ok: false, error: `上限策略只能是 ${CAP_POLICIES.join(" / ")}。` };
-        }
-        store.groupCapPolicy = policy;
-      }
-      if (teamRuntime.save() !== true) {
-        store.maxTeamSize = before.maxTeamSize;
-        store.groupCapPolicy = before.groupCapPolicy;
-        return { ok: false, error: `写 ${TEAM_FILE} 失败，改动没有生效。` };
-      }
-      return { ok: true, action, state: await teamState() };
-    }
-
-    if (action === "reload") {
-      teamRuntime.reload();
-      await syncTeamPresets();
-      return { ok: true, action, state: await teamState() };
-    }
-
-    return { ok: false, error: `不认识的团队操作：${action || "（空）"}。` };
-  }
-
-  /**
-   * Wipe every session's team memory (the panel's 「清空团队记忆」).
-   *
-   * Deliberately all-of-it, not per-session: the panel does not know session
-   * ids, and memory without its session is unreadable clutter anyway. The
-   * personas, teams.json and the ledger are untouched — this clears plot
-   * recall, nothing else.
-   */
-  async function teamMemoryClear() {
-    if (teamRuntime === null || typeof teamRuntime.clearMemory !== "function") {
-      return { ok: false, error: "团队运行时未就绪。" };
-    }
-    const removed = await teamRuntime.clearMemory();
-    return { ok: true, removed };
-  }
-
-  /**
-   * What `/waifu-team`'s picker offers for ONE session.
-   *
-   * Read-only, and deliberately so: this is the same seam `/waifu-change`'s
-   * picker uses (`waifuState`), and the same rule applies — the popup shows
-   * what can be chosen and then RUNS the host command, so the switch lands in
-   * the session log instead of being a silent side effect of opening a list.
-   *
-   * The "single mode" row is gone. It used to sit under the team list as a
-   * "mode" choice, which made a team picker look like it offered a team that
-   * was not one, and — worse — a session that had left team mode via that row
-   * could then serve no persona at all. A team picker lists teams only; leaving
-   * a team is `/waifu-change` (switch to a single persona) or `/waifu-reset`
-   * (back to the session's own persona).
-   */
-  async function teamPick(request) {
-    if (teamRuntime === null) {
-      return { ok: false, error: "团队运行时还没装上，这个会话看不到团队。" };
-    }
-    const state = await teamState();
-    if (state.ok !== true) return state;
-    const sessionId = oneLine(request.sessionId);
-    const now = sessionId === "" ? null : teamRuntime.stateOf(sessionId).team ?? null;
-    // `now` is what the file says the session is on, which is not the same as
-    // team mode being LIVE: a team that resolves to one member falls back to
-    // single mode. Marking it current would draw a check next to a team that
-    // is not actually running, so the mark follows the mode, not the binding.
-    const live = sessionId === "" ? null : teamRuntime.stateOf(sessionId).mode === "team" ? now : null;
-    const rows = state.teams.map((entry) => {
-      const members = entry.preview?.ok === true ? (entry.preview.members ?? []) : [];
-      const detail =
-        entry.preview?.ok !== true
-          ? "这一队现在解析不出成员。"
-          : members.length === 0
-            ? "这一队现在是空的。"
-            : `${members.length} 人：${members.map((row) => row.name).join("、")}`;
-      return {
-        id: entry.name,
-        label: entry.name,
-        detail,
-        ...(live === entry.name ? { active: true } : null),
-        group: { name: "teams", label: "团队" },
-      };
-    });
-    return {
-      ok: true,
-      rows,
-      active: live,
-      bound: now,
-      problem: state.problem,
-    };
-  }
-
-  /** The roster a picker may offer: exactly what can be mounted right now. */
-  function choosableRows() {    const orderOf = (item) =>
-      typeof item.order === "number" ? item.order : Number.MAX_SAFE_INTEGER;
-    return listFiles()
-      .filter((item) => item.problems.length === 0 && item.idOk === true)
-      .sort(
-        (a, b) =>
-          orderOf(a) - orderOf(b) ||
-          String(a.name ?? a.id).localeCompare(String(b.name ?? b.id)),
-      )
-      .map((item) => ({ id: item.id, name: item.name }));
-  }
-
-  /** Point one session at one persona. The write is the whole operation. */
-  async function waifuApply(request) {
-    const sessionId = oneLine(request.sessionId);
-    if (sessionId === "")
-      return {
-        ok: false,
-        error: "这个操作要知道是哪个会话，但没拿到 session id。",
-      };
-    const rows = choosableRows();
-    if (rows.length === 0)
-      return { ok: false, error: "这个人设目录里没有可用的人设。" };
-    const matched = matchPersona(
-      oneLine(request.personaId) || oneLine(request.query),
-      rows,
-    );
-    if (matched.ok !== true)
-      return {
-        ok: false,
-        error: matched.error,
-        candidates: matched.candidates ?? [],
-      };
-    const found = safeText(matched.id);
-    if (found === null) {
-      return {
-        ok: false,
-        error: `「${matched.id}」现在组装不出来（少了 [[body]]、或正文里混进了非法的 {{…}}），没有替换。`,
-      };
-    }
-    // Both reads happen before the override is laid down: the chip still names
-    // the session's own preset here, and this is the last moment it does.
-    const live = liveAgentFor(sessionId);
-    setOverride(sessionId, matched.id, anchorOf(live));
-    // Same move as the command path: the persona is the override, the chip is
-    // this event, and without it the label names whoever the session was born
-    // with (see `rememberSessionPreset`).
-    rememberSessionPreset(live, matched.id);
-    return { ok: true, id: matched.id, name: found.name };
-  }
-
-  async function waifuClear(request) {
-    const sessionId = oneLine(request.sessionId);
-    if (sessionId === "")
-      return {
-        ok: false,
-        error: "这个操作要知道是哪个会话，但没拿到 session id。",
-      };
-    const had = overrideOf(sessionId);
-    // Read before the clear: clearing is what drops the record that holds it.
-    const resting = restingOf(sessionId);
-    setOverride(sessionId, null);
-    restoreSessionPreset(liveAgentFor(sessionId), resting);
-    await refreshDefault();
-    return { ok: true, had, defaultId: cachedDefault.id };
-  }
-
-  /**
-   * Rewrite one file's `order` line, and nothing else.
-   *
-   * A full `renderPersona` round-trip would also trim the body and drop any
-   * field this panel does not know about; reordering is not an edit, so it only
-   * moves the one line and leaves the bytes alone.
-   * @param {string} full absolute path
-   * @param {number} value the order to write
-   * @returns {boolean} whether the file changed
-   */
-  function setOrderLine(full, value) {
-    let raw;
-    try {
-      raw = fs.readFileSync(full, "utf8");
-    } catch {
-      return false;
-    }
-    const withoutBom = raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw;
-    const match = /^---\r?\n([\s\S]*?)\r?\n---/.exec(withoutBom);
-    if (match === null) return false;
-    const meta = match[1]
-      .replace(/\r\n/g, "\n")
-      .split("\n")
-      .filter((line) => line.trim() !== "" && !/^order\s*:/.test(line));
-    if (meta.some((line) => /^order\s*:/.test(line))) return false;
-    const current = /(^|\n)order\s*:\s*([^\n]*)/.exec(match[1]);
-    if (current !== null && Number(current[2].trim()) === value) return false;
-    const nextMeta = [...meta, `order: ${value}`].join("\n");
-    const head = withoutBom.slice(0, match.index);
-    const tail = withoutBom.slice(match.index + match[0].length);
-    writeAtomic(full, `${head}---\n${nextMeta}\n---${tail}`);
-    return true;
-  }
-
-  /**
-   * Persist one drag result: the given ids get `order: 1..n` in that sequence.
-   *
-   * Rows the caller did not mention keep whatever they had, so a filtered or
-   * paged view still produces a total order for the ids it showed.
-   */
-  async function waifuOrder(request) {
-    if (!writable) return readOnly();
-    const ids = (Array.isArray(request.ids) ? request.ids : [])
-      .map((id) => oneLine(id))
-      .filter((id) => id !== "");
-    if (ids.length === 0) return { ok: false, error: "没有给出顺序。" };
-    const seen = new Set();
-    for (const id of ids) {
-      if (seen.has(id))
-        return { ok: false, error: `这个 id 出现了两次：${id}` };
-      seen.add(id);
-    }
-    const known = new Set(listFiles().map((item) => item.id));
-    const unknown = ids.filter((id) => !known.has(id));
-    if (unknown.length > 0)
-      return { ok: false, error: `这些人设不在目录里：${unknown.join(" / ")}` };
-    const changed = [];
-    let index = 0;
-    for (const id of ids) {
-      index += 1;
-      if (setOrderLine(fileFor(id), index)) changed.push(id);
-    }
-    const reloaded = await scan();
-    return { ok: true, order: ids, changed, reloaded: reloaded.reloaded ?? [] };
-  }
-
-  /**
-   * Remove THIS package's entries from `minimumReleaseAgeExclude`.
-   *
-   * The list lives in a profile's `pnpm-workspace.yaml` — a file pnpm owns —
-   * but every entry naming `dsh-waifu-agents` exists BECAUSE of this plugin:
-   * pnpm wrote it to let our install past the 24h freshness policy. Deleting
-   * our own lines is not reaching into another owner's file any more than
-   * unregistering our presets is; the entries that name other packages, and
-   * every other byte of the file, pass through untouched.
-   *
-   * The profile name is only visible when `DSH_PROFILE_DIR` reaches this
-   * process; without it every profile is scanned, which is safe precisely
-   * because the filter matches our name and nothing else. A profile that
-   * never installed this plugin has no matching line and is left identical —
-   * the write happens only when a line was actually removed.
-   * @returns {{ cleaned: string[], failed: string[] }}
-   */
-  function cleanReleaseAgeExcludes() {
-    const cleaned = [];
-    const failed = [];
-    const profileDir = process.env.DSH_PROFILE_DIR
-      ? path.resolve(process.env.DSH_PROFILE_DIR)
-      : null;
-    let candidates;
-    if (profileDir !== null) {
-      candidates = [path.join(profileDir, "pnpm-workspace.yaml")];
-    } else {
-      const profiles = path.join(homeFromEnv(process.env).home, "profiles");
-      try {
-        candidates = fs
-          .readdirSync(profiles, { withFileTypes: true })
-          .filter((row) => row.isDirectory())
-          .map((row) => path.join(profiles, row.name, "pnpm-workspace.yaml"));
-      } catch {
-        candidates = [];
-      }
-    }
-    for (const full of candidates) {
-      let raw;
-      try {
-        raw = fs.readFileSync(full, "utf8");
-      } catch {
-        continue; // no such file — a profile without pnpm state, nothing to do
-      }
-      const lines = raw.split("\n");
-      const keep = [];
-      let changed = false;
-      for (let at = 0; at < lines.length; ) {
-        const line = lines[at];
-        if (!/^minimumReleaseAgeExclude\s*:/.test(line)) {
-          keep.push(line);
-          at += 1;
-          continue;
-        }
-        // Flow form `key: [a, b]`: filter inside the brackets, drop the key
-        // when nothing of ours was in it (then the line is reproduced as-is).
-        const flow = /^minimumReleaseAgeExclude\s*:\s*\[(.*)\]\s*\r?$/.exec(line);
-        if (flow !== null) {
-          const items = flow[1]
-            .split(",")
-            .filter((item) => item.trim() !== "");
-          const rest = items.filter((item) => !item.includes(PACKAGE_NAME));
-          if (rest.length === items.length) {
-            keep.push(line);
-          } else {
-            changed = true;
-            if (rest.length > 0)
-              keep.push(`minimumReleaseAgeExclude: [${rest.join(", ")}]`);
-          }
-          at += 1;
-          continue;
-        }
-        // Block form: gather the list items that follow.
-        const items = [];
-        let cursor = at + 1;
-        while (cursor < lines.length && /^\s+-\s/.test(lines[cursor])) {
-          items.push(lines[cursor]);
-          cursor += 1;
-        }
-        const rest = items.filter((item) => !item.includes(PACKAGE_NAME));
-        if (rest.length === items.length) {
-          keep.push(line, ...items);
-        } else {
-          changed = true;
-          if (rest.length > 0) keep.push(line, ...rest);
-          // zero left: the key goes too — an empty list is noise
-        }
-        at = cursor;
-      }
-      if (!changed) continue;
-      try {
-        writeAtomic(full, keep.join("\n"));
-        cleaned.push(full);
-      } catch (error) {
-        failed.push(`${full}：${error?.message ?? error}`);
-      }
-    }
-    return { cleaned, failed };
-  }
-
-  /**
-   * Undo everything this plugin put outside its own package.
-   *
-   * Only three things are ours and outlive an uninstall: the per-session
-   * override store, the `selectedDefault` line this panel writes into the
-   * agent-preset registry's config, and — only when explicitly asked — the
-   * persona directory itself. The freshness allow-list lines naming this
-   * package are ours too (pnpm wrote them for OUR install), and are stripped.
-   * Everything else an install leaves behind belongs to
-   * the platform (the plugin-manager's operation logs, pnpm's store index),
-   * so this op names them instead of pretending to clean them.
-   * @param {{ dir?: boolean }} request
-   */
-  async function purge(request) {
-    const withDir = request?.dir === true;
-    const done = [];
-    const failed = [];
-    for (const file of new Set([overrideFile, legacyOverrideFile])) {
-      try {
-        if (!fs.existsSync(file)) continue;
-        fs.rmSync(file, { force: true });
-        done.push(`删除覆盖记录 ${file}`);
-      } catch (error) {
-        failed.push(`覆盖记录：${error?.message ?? error}`);
-      }
-    }
-    overrides = {};
-    try {
-      const excludes = cleanReleaseAgeExcludes();
-      for (const full of excludes.cleaned)
-        done.push(`清掉放行记录 ${full} 里属于本包的条目`);
-      for (const message of excludes.failed) failed.push(`放行记录：${message}`);
-    } catch (error) {
-      failed.push(`放行记录：${error?.message ?? error}`);
-    }
-    try {
-      const configEditor = ctx.get("configEditor");
-      const entry =
-        configEditor === undefined || configEditor === null
-          ? undefined
-          : findRegistryEntry(configEditor);
-      if (entry === undefined)
-        failed.push("找不到 agent-preset-registry 这条配置项，全局默认没清。");
-      else {
-        let cleared = "";
-        await refreshDefault({ force: true });
-        const picked = oneLine(cachedDefault.id);
-        if (
-          picked !== "" &&
-          (owned.has(picked) || fs.existsSync(fileFor(picked)))
-        ) {
-          // Same path as `setDefault`, for the same reason: only the settings
-          // service emits the event that makes the app re-read the roster.
-          const written = await writeDefault({
-            configEditor,
-            entry,
-            id: null,
-          });
-          if (written.ok) cleared = picked;
-          else failed.push(`全局默认没清：${written.error}`);
-        }
-        done.push(
-          cleared === ""
-            ? "全局默认本来就没指向本插件的人设"
-            : `清掉全局默认 ${cleared}`,
-        );
-        if (cleared !== "") {
-          // Same rule as `setDefault`: the field is only really clear once the
-          // live registry stops naming it. `purge` is the one op whose whole
-          // promise is 「我留下的东西都没了」, so a step must never be reported
-          // before the platform agrees it happened.
-          const settled = await verifyDefault(null, {
-            previous: cleared,
-            checkable: true,
-          });
-          if (!settled.verified && settled.checkable)
-            failed.push(
-              `全局默认：写进去了，但读回来还是「${settled.id ?? "（没指定）"}」，没清干净。`,
-            );
-          // Same second step as `setDefault`, and it matters more here: a blank
-          // session left naming a wife this op is supposed to have erased would
-          // contradict the one thing `purge` promises.
-          const resettled = await resettleUnstarted({
-            to: oneLine(cachedDefault.id),
-            from: cleared,
-          });
-          if (resettled.moved.length > 0)
-            done.push(
-              `把 ${resettled.moved.length} 个还没开口的会话撤出本插件的人设`,
-            );
-        }
-      }
-    } catch (error) {
-      failed.push(`全局默认：${error?.message ?? error}`);
-    }
-    if (withDir) {
-      if (!writable) failed.push("人设目录在插件包内，没有删。");
-      else if (!fs.existsSync(dir)) done.push("人设目录本来就不在");
-      else {
-        try {
-          fs.rmSync(dir, { recursive: true, force: true });
-          fileCache.clear();
-          done.push(`删除人设目录 ${dir}`);
-        } catch (error) {
-          failed.push(`人设目录：${error?.message ?? error}`);
-        }
-      }
-    }
-    await refreshDefault();
-    return {
-      ok: failed.length === 0,
-      dir,
-      done,
-      failed,
-      // Named, not cleaned: these are the platform's, and the plugin has no
-      // business deleting another owner's files.
-      platform: [
-        ".plugin-manager\\logs\\operation-*（安装日志，平台自己累积）",
-        "pnpm 内容库索引：需要 pnpm store prune",
-      ],
-    };
-  }
-
+  const {
+    refreshMemorySnapshot,
+    personaMemoryForTeam,
+    currentPersonaIdOf,
+    memorySnapOf,
+    choosableRows,
+    teamPick,
+    memoryState,
+    memorySet,
+    memoryEntries,
+    memoryEdit,
+    memoryRemove,
+    memoryClear,
+    purge,
+    waifuApply,
+    waifuClear,
+    waifuOrder,
+  } = installMemoryOps(ctx, {
+    DEFAULT_MAX_ENTRIES,
+    ENTRY_MAX_CHARS,
+    MAX_MAX_ENTRIES,
+    MIN_MAX_ENTRIES,
+    PACKAGE_NAME,
+    clampEntryText,
+    clampMaxEntries,
+    clearStore,
+    dir,
+    effectiveEnabled,
+    homeFromEnv,
+    listStoredIds,
+    matchPersona,
+    oneLine,
+    personaConfigOf,
+    readConfig,
+    readStore,
+    recallEntries,
+    recentEntries,
+    renderMemoryBlock,
+    trimToLimit,
+    updateConfig,
+    writeStore,
+    anchorOf,
+    expectsPersona,
+    fileCache,
+    fileFor,
+    findRegistryEntry,
+    legacyOverrideFile,
+    liveAgentFor,
+    listFiles,
+    overrideFile,
+    overrideOf,
+    owned,
+    personaMemoryDir,
+    rememberSessionPreset,
+    rename,
+    resettleUnstarted,
+    restoreSessionPreset,
+    restingOf,
+    roster,
+    safeText,
+    scan,
+    servedIds,
+    sessionPersona,
+    setDefault,
+    setOverride,
+    shownPresetOf,
+    teamMemoryClear,
+    teamSet,
+    teamState,
+    verifyDefault,
+    waifuState,
+    writeAtomic,
+    writeDefault,
+    readOnly,
+    writable,
+    refreshDefault,
+    teamRuntime: () => teamRuntime,
+    cachedDefault: () => cachedDefault,
+    resetOverrides: () => {
+      overrides = {};
+    },
+  });
   async function run(request) {
     const op = String(request.op ?? "list");
     if (op === "list") return status();
     if (op === "get") return readOne(request);
     if (op === "refresh") {
       const result = await scan();
-      // `status()` is async again (it reads the roster for `defaultId`), so the
-      // spread needs an await — a bare spread would spread a Promise.
+      /*
+       * 重读目录的同一个按钮也重读记忆：磁盘上的东西在面板外被改过时，这是
+       * 用户唯一的杠杆，否则快照只会被我们自己的写入刷新。
+       */
+      await refreshMemorySnapshot();
+      // `status()` 又是 async 的了（它为 `defaultId` 读花名册），所以展开需要
+      // 一个 await——裸展开会展开一个 Promise。
       return { ...(await status()), ...result };
     }
     if (op === "create") return create(request);
@@ -6261,9 +3383,15 @@ export function apply(ctx, config = {}) {
     if (op === "teamSet") return teamSet(request);
     if (op === "teamPick") return teamPick(request);
     if (op === "teamMemoryClear") return teamMemoryClear();
-    if (op === "updateCheck") return updateCheck();
-    if (op === "updateApply") return updateApply(request);
-    if (op === "updateProgress") return updateProgress(request);
+    if (op === "memoryState") return memoryState();
+    if (op === "memorySet") return memorySet(request);
+    if (op === "memoryEntries") return memoryEntries(request);
+    if (op === "memoryEdit") return memoryEdit(request);
+    if (op === "memoryRemove") return memoryRemove(request);
+    if (op === "memoryClear") return memoryClear(request);
+    if (op === "updateCheck") return updater.updateCheck();
+    if (op === "updateApply") return updater.updateApply(request);
+    if (op === "updateProgress") return updater.updateProgress(request);
     if (op === "purge") return purge(request);
     return {
       ok: false,
@@ -6271,8 +3399,8 @@ export function apply(ctx, config = {}) {
     };
   }
 
-  // One operation, one implementation; the panel reaches it through the
-  // generated `ctx.remote.commands` face, an agent tool can call `run` later.
+  // 一个操作一份实现；面板经由生成出的 `ctx.remote.commands` 面到达它，
+  // agent 工具之后也可以调用 `run`。
   ctx.commands.register({
     name: "persona",
     description:
@@ -6303,310 +3431,85 @@ export function apply(ctx, config = {}) {
     },
   });
 
-  /* ------------------------------------------- session persona commands */
-
-  const sidOf = (agent) => oneLine(agent?.session?.id);
-  /**
-   * The anchor read lives in {@link anchorOf}: the session header only ever
-   * names the preset the session was born with, while the `agentPreset`
-   * projection follows every later `agent-preset/selected`.
-   */
-  const mountedOf = (agent) => anchorOf(agent);
-  const SOURCE_LABEL = {
-    override: "本会话覆盖",
-    mounted: "会话挂载",
-    default: "全局默认回落",
-    none: "无",
-  };
-
-  ctx.commands.register({
-    name: "waifu-change",
-    description:
-      "换掉这个会话正在用的人设：不带参数会打开选择器，带名字就直接切换（下一轮生效）。",
-    input: { hint: "名字" },
-    handler: async ({ agent, rawInput }) => {
-      const sessionId = sidOf(agent);
-      if (sessionId === "")
-        return { kind: "error", text: "这个命令只能在会话里用。" };
-      const wanted = oneLine(rawInput);
-      const rows = choosableRows();
-      if (wanted === "") {
-        return {
-          kind: "error",
-          text: `没有给出名字。Web 端打 /waifu-change 会打开选择器；这里请直接写名字：/waifu-change ${rows[0]?.name ?? "名字"}\n现有：${rows.map((row) => row.name).join(" / ")}`,
-        };
-      }
-      const matched = matchPersona(wanted, rows);
-      if (matched.ok !== true) {
-        return {
-          kind: "error",
-          text: `${matched.error}${(matched.candidates ?? []).length > 0 ? `\n${(matched.candidates ?? []).join(" / ")}` : ""}`,
-        };
-      }
-      const found = safeText(matched.id);
-      if (found === null) {
-        return {
-          kind: "error",
-          text: `「${matched.id}」现在组装不出来（少了 [[body]]、或正文里混进了非法的 {{…}}），没有替换，这一轮仍然用原来那个人设。`,
-        };
-      }
-      const already = overrideOf(sessionId);
-      /*
-       * Switching to a single persona leaves team mode. Without this the
-       * in-memory binding outranks the freshly chosen persona on the next
-       * assembly (`teamNameFor` reads `bound` first), so `/waifu-change` would
-       * report a switch the model never sees.
-       */
-      teamRuntime?.unbind?.(sessionId);
-      setOverride(sessionId, matched.id, mountedOf(agent));
-      // The override is what the model is told; this is what the row above the
-      // conversation shows. Without it a running session keeps the label of the
-      // wife it was born with (see `rememberSessionPreset`).
-      rememberSessionPreset(agent, matched.id);
-      let note = "";
-      if (!hasPersonaRow(mountedOf(agent))) {
-        const shadow = ensureShadow(agent);
-        note =
-          shadow.ok === true
-            ? "（这个会话原本没挂人设，已经单独给它挂上）"
-            : `（这个会话原本没人设，兜底也失败了：${shadow.error}）`;
-      }
-      /*
-       * 「已切换」 is a claim about the session, so it must not be printed when the
-       * session was already her. Re-running the same command used to answer
-       * 「已切换：大肥鱼」 while the served prompt did not change at all — and the
-       * loop, seeing identical text, commits no new system node, so nothing was
-       * re-anchored either. That reads as "换人没生效" from the outside, which is
-       * the exact confusion this wording exists to prevent.
-       */
-      if (already === matched.id) {
-        return {
-          kind: "success",
-          text: `本来就是 ${found.name} · 来源：本会话 · 没有改动${note}`,
-        };
-      }
-      return {
-        kind: "success",
-        text: `已切换：${found.name} · 来源：本会话 · 从下一轮开始生效${note}`,
-      };
-    },
-  });
-
-  ctx.commands.register({
-    name: "waifu-current",
-    description: "看这个会话现在在用谁，以及这个值是从哪来的。",
-    handler: async ({ agent }) => {
-      const sessionId = sidOf(agent);
-      if (sessionId === "")
-        return { kind: "error", text: "这个命令只能在会话里用。" };
-      await refreshDefault();
-      const mountedId = mountedOf(agent);
-      const found = sessionPersona(sessionId, mountedId);
-      const override = overrideOf(sessionId);
-      if (found.id === null)
-        return { kind: "error", text: "这个会话现在没有可用的人设。" };
-      /*
-       * The id is invisible by design — the file name follows the display name —
-       * so for every persona whose name IS her file name, this line used to read
-       * 「阿库娅 · 阿库娅」. The id is only worth printing when it says something
-       * the name does not: it is what `/waifu-change` and `overrides.json` match
-       * on, so a wife whose name had to be slugified (`Bad Name` -> `bad-name`)
-       * still gets hers shown.
-       */
-      const label =
-        found.id === found.name
-          ? `本会话人设：${found.name}`
-          : `本会话人设：${found.name} · ${found.id}`;
-      const lines = [label];
-      if (override !== null && override !== found.id) {
-        lines.push(
-          `（记录里是「${override}」，它已经不可用，所以退到了上面这个。清掉记录：/waifu-reset）`,
-        );
-      } else if (
-        override === null &&
-        mountedId !== "" &&
-        mountedId !== found.id
-      ) {
-        lines.push(
-          `（会话挂载的「${mountedId}」已经不可用，所以回落到了全局默认。换人：/waifu-change 名字）`,
-        );
-      }
-      // Where `/waifu-reset` would land, which is not the mounted id once this
-      // session has been switched: the chip names the override by then.
-      const home = restingOf(sessionId);
-      if (override !== null && home !== "" && home !== found.id) {
-        lines.push(`（清掉覆盖会回到「${home}」：/waifu-reset）`);
-      }
-      return { kind: "success", text: lines.join("\n") };
-    },
-  });
-
-  ctx.commands.register({
-    name: "waifu-reset",
-    description:
-      "清掉这个会话的人设覆盖，回到这个会话自己的人设——也就是换人之前它在跑的那位（没记录就回到它出生时挂的那位，再不行回落全局默认）。",
-    handler: async ({ agent }) => {
-      const sessionId = sidOf(agent);
-      if (sessionId === "")
-        return { kind: "error", text: "这个命令只能在会话里用。" };
-      const hadPersona = overrideOf(sessionId);
-      // Read before the clear: clearing is what drops the record that holds it.
-      // Without it the chip — which this plugin moved onto the override — is the
-      // only thing left to read, and the session comes back as the LAST wife it
-      // was switched to instead of the one it started this conversation as.
-      const home = restingOf(sessionId);
-      setOverride(sessionId, null);
-      /*
-       * A `/waifu-team` binding is an override too. Clearing only the persona
-       * record left the team in place, so reset answered "本来就没有覆盖" while
-       * the next turn still ran as that team — the exact report that made the
-       * command look broken.
-       */
-      const team = teamRuntime?.unbind?.(sessionId) ?? { bound: undefined, off: false };
-      // Put the label back where the session lives: `restoreSessionPreset` falls
-      // back to the header (the preset it was BORN with), which is what a team
-      // switch never changed.
-      restoreSessionPreset(agent, home);
-      await refreshDefault();
-      if (hadPersona === null && team.bound === undefined && team.off !== true)
-        return {
-          kind: "success",
-          text: "这个会话本来就没有覆盖，什么都没改。",
-        };
-      dropShadow(sessionId);
-      // Where it lands. `home` is the persona it ran before the first switch;
-      // otherwise the chip was restored to the born preset. If that target is a
-      // TEAM preset, naming a persona would be the wrong answer — the session
-      // is back on that team, not on a single wife.
-      const target = home !== "" ? home : oneLine(agent?.session?.header?.agentPreset);
-      const targetTeam = teamNameForPreset(target);
-      const found = targetTeam === null ? sessionPersona(sessionId, target) : null;
-      const where =
-        targetTeam !== null
-          ? `回到团队「${targetTeam}」`
-          : found === null || found.id === null
-            ? "这个会话现在没有可用的人设"
-            : `回到 ${found.name}（${SOURCE_LABEL[found.source] ?? found.source}）`;
-      const parts = [];
-      if (hadPersona !== null) parts.push(`人设覆盖（之前是「${hadPersona}」）`);
-      if (team.bound !== undefined) parts.push(`团队绑定（之前是「${team.bound}」）`);
-      const cleared = parts.length > 0 ? `已清掉${parts.join("、")}` : "已取消团队模式";
-      /*
-       * The chip is the persisted half of this: a session is re-mounted from
-       * what its projection names, so leaving it on the dropped override would
-       * bring it back on the next resume. If the append did not take (chip sync
-       * off, or the platform refused it), say so instead of reporting the move
-       * as done — the failure would otherwise resurface as 「重启后怎么又是她」.
-       */
-      const chip = mountedOf(agent);
-      const drift =
-        target !== "" && chip !== "" && chip !== target
-          ? `\n（会话标签没跟上：现在还写着「${chip}」，重启这个会话可能又变回它）`
-          : "";
-      return {
-        kind: "success",
-        text: `${cleared} · ${where} · 从下一轮开始生效${drift}`,
-      };
-    },
-  });
-
-  /* ------------------------------------------------------- HTTP route */
-
-  /** The panel route. `prefix`, so sub-paths match as well. */
-  const ROUTE_PATH = "/waifu-agents/api";
-
-  /** Only a loopback peer may drive this route. */
-  function isLoopbackPeer(req) {
-    const address = req.socket?.remoteAddress ?? "";
-    return (
-      address === "127.0.0.1" ||
-      address === "::1" ||
-      address === "::ffff:127.0.0.1"
-    );
-  }
-
-  function sendJson(res, status, payload) {
-    const body = JSON.stringify(payload);
-    res.writeHead(status, {
-      "content-type": "application/json; charset=utf-8",
-      "content-length": Buffer.byteLength(body),
-      "cache-control": "no-store",
-    });
-    res.end(body);
-  }
-
-  async function readJsonBody(req) {
-    const chunks = [];
-    let size = 0;
-    for await (const chunk of req) {
-      size += chunk.length;
-      if (size > 16 * 1024 * 1024) {
-        throw new Error(
-          "请求体过大（超过 16MB）：这一侧限制的是「面板 → 插件」的请求体，单个人设不该走到这里。",
-        );
-      }
-      chunks.push(chunk);
-    }
-    const text = Buffer.concat(chunks).toString("utf8").trim();
-    return JSON.parse(text === "" ? "{}" : text);
-  }
-
-  async function handleHttp(req, res) {
-    try {
-      if (!isLoopbackPeer(req)) {
-        sendJson(res, 403, {
-          ok: false,
-          error: "这个路由只接受本机（loopback）请求。",
-        });
-        return;
-      }
-      if (req.method !== "POST") {
-        sendJson(res, 405, { ok: false, error: "请用 POST 提交 JSON。" });
-        return;
-      }
-      let request;
-      try {
-        request = await readJsonBody(req);
-      } catch (error) {
-        sendJson(res, 400, {
-          ok: false,
-          error: `参数不是合法 JSON：${error?.message ?? error}`,
-        });
-        return;
-      }
-      sendJson(res, 200, await run(request));
-    } catch (error) {
-      sendJson(res, 500, { ok: false, error: String(error?.message ?? error) });
-    }
-  }
+  /* ------------------------------------------- 会话人设命令 */
 
   /*
-   * The settings panel cannot use the command path. `settings.plugins.tab`
-   * declares `SettingsPluginsTabOwnerProps` with EMPTY owner props, so the
-   * component never receives a session id — and `ctx.remote.commands.execute`
-   * requires one. An HTTP route needs neither an agent nor a session, so the
-   * panel posts the very same JSON to the very same `run` entry point.
+   * 三个 `/waifu-*` 命令住在 `commands.js`。留在这里的是唯一搬不动的：
+   * 它们需要的那袋句柄。每一项都是指向上方闭包的函数引用，而
+   * `teamRuntimeOf` 之所以是 thunk，是因为团队运行时在本函数里建得比这次
+   * 调用晚——捕获的值会永远是 `null`。
    */
+  installCommands(ctx, {
+    anchorOf,
+    applySessionMode: (sessionId, mode) => setSessionMode(sessionId, mode),
+    /* `/waifu-reset global` 的唯一用途就是读到这个「现在是谁」。 */
+    cachedDefault: () => cachedDefault,
+    choosableRows,
+    dropShadow,
+    ensureShadow,
+    hasPersonaRow,
+    matchPersona,
+    /*
+     * `/waifu-mode` 的三件套。`parseModeCommand` 以函数形式穿过这道边界，
+     * 而不是让 `commands.js` 反过来 `import` 本文件：那会绕成一个环，而
+     * 这条边界存在的理由就是「命令侧只拿它需要的那几样」。
+     */
+    modeInfoOf: (sessionId) => {
+      const teamState = teamRuntime?.stateOf?.(sessionId) ?? null;
+      /*
+       * 「这个会话在团队上」有两个来源：`mode === "team"`（agent 在场、当场
+       * 解析出成员），和 `team != null`（有绑定，但这一刻没有可用的 agent
+       * ——回合刚结束、会话还没重新组装，`stateOf` 会返回 `unknown`）。
+       *
+       * 只认前一种，`/waifu-current` 就会在一场明明由托尔和康娜回答的会话
+       * 里报「聊天模式（全局）」。用户看到的正是「团队没生效」。
+       */
+      const teamMode =
+        oneLine(teamState?.mode) === "team" || teamState?.team != null;
+      const session = sessionModeOf(sessionId);
+      const effective = resolveMode({ session, global: currentMode });
+      return {
+        global: currentMode,
+        session,
+        effective,
+        teamMode,
+        sealed:
+          shouldSealTools({ teamMode, mode: effective, ours: true }) !== "",
+      };
+    },
+    parseModeCommand,
+    setGlobalMode: (mode) => run({ op: "setMode", mode }),
+    overrideOf,
+    refreshDefault,
+    rememberSessionPreset,
+    restoreSessionPreset,
+    restingOf,
+    safeText,
+    sessionPersona,
+    setOverride,
+    teamNameForPreset,
+    teamRuntimeOf: () => teamRuntime,
+  });
+
+
+  /* ------------------------------------------------------- HTTP 路由 */
+
   /*
-   * `ctx.get('webServer')` is NOT enough here, and it fails silently:
-   * `get` defaults to `strict = true`, so it returns a service only while the
-   * providing fiber is ACTIVE — and the webserver fiber reaches ACTIVE only
-   * after its async `listen` settles. A single early `get` therefore sees
-   * `undefined`, and nothing ever retries, so the route never enters the
-   * table. `ctx.inject` starts this separate fiber only once `webServer`
-   * really exists. It deliberately sits OUTSIDE the preset registration
-   * above: if a webserver is ever absent we lose the panel, never the
-   * personas.
+   * 面板路由只需要一样东西——op 分发器——所以它的全部安装就是这一行。
+   * 回环守卫、请求体上限，以及这里是 HTTP 而不是 `ctx.remote.commands` 的
+   * 原因，都住在 `http-route.js`。
    */
-  ctx.inject(["webServer"], (ctx) => {
-    ctx.effect(
-      () =>
-        ctx.webServer.register({
-          kind: "prefix",
-          path: ROUTE_PATH,
-          handler: (req, res) => handleHttp(req, res),
-        }),
-      "waifu-agents: http route",
+  installHttpRoute(ctx, { run });
+
+
+  /*
+   * 在第一次组装来问之前把记忆快照焐热。刻意与扫描并行：两者回答不同的
+   * 问题，谁也不需要谁的答案，而这里一次读失败绝不能让任何人设付出注册的
+   * 代价。
+   */
+  void refreshMemorySnapshot().catch((error) => {
+    ctx.logger?.warn?.(
+      `dsh-waifu-agents: 读取长期记忆失败：${error?.message ?? error}`,
     );
   });
 
@@ -6624,15 +3527,13 @@ export function apply(ctx, config = {}) {
       );
     })
     /*
-     * Then the default. `scan()` only ADOPTS files — it never looks at what
-     * `selectedDefault` names — so a persona deleted off disk while the app was
-     * closed leaves the registry pointing at a preset nothing holds, and every
-     * new session is then refused with `agent-preset/not-found`
-     * (`registry.js:643`) with nothing on screen to explain why.
+     * 然后是默认。`scan()` 只收编文件——从不看 `selectedDefault` 指名了什么
+     * ——所以应用关闭期间被从盘上删掉的人设会让注册表指着一个谁也不持有的
+     * 预设，之后每个新会话都被 `agent-preset/not-found`（`registry.js:643`）
+     * 拒绝，屏幕上却什么解释都没有。
      *
-     * Chained AFTER the scan rather than run beside it, so the roster already
-     * carries this plugin's own rows: otherwise a `selectedDefault` naming one of
-     * OUR personas would look dangling and be cleared for nothing.
+     * 链在扫描之后而不是与它并跑，这样花名册已经带着本插件自己的行：否则
+     * 一个指名我们人设的 `selectedDefault` 会显得悬空、被白白清掉。
      */
     .then(() => reconcileDefault())
     .catch((error) => {

@@ -1,69 +1,64 @@
 /**
- * Team memory: what lets one round know what the previous rounds said.
+ * 团队记忆：让下一轮知道之前几轮说过什么的东西。
  *
- * ## The shape
+ * ## 结构
  *
- * A session's memory is three boxes:
+ * 一个会话的记忆是三个盒子：
  *
- *  - `rounds`  — the recent discussion, **verbatim**, one entry per round.
- *  - `summary` — everything older, compressed into one bounded paragraph.
- *  - `backlog` — rounds evicted from `rounds` but not yet folded into
- *    `summary` (the fold needs an LLM call, and failing to make one must
- *    never lose the text).
+ *  - `rounds`  —— 最近的讨论，**逐字**保留，每轮一条。
+ *  - `summary` —— 更早的一切，压缩成一段有界的段落。
+ *  - `backlog` —— 已从 `rounds` 驱逐、但尚未折叠进 `summary` 的各轮
+ *    （折叠需要一次 LLM 调用，而调用失败绝不能丢掉文本）。
  *
- * ## Why characters, not tokens
+ * ## 为什么用字符而不是 token
  *
- * Every limit here is in characters. A tokenizer does not run in this
- * plugin, and the Chinese≈0.63-token-per-char estimate is wrong by
- * hundreds of tokens at the 4k scale — a budget denominated in tokens
- * would be a fiction with decimal places. Characters are measurable, and
- * the defaults are chosen conservatively against that measure.
+ * 这里的每个上限都以字符计。本插件不运行分词器，而
+ * 中文≈每字符 0.63 token 的估算在 4k 量级上能差出几百个 token ——
+ * 以 token 计的预算只是带着小数点的虚构。字符可测量，
+ * 各默认值也是按这个度量保守选取的。
  *
- * ## Why eviction is whole-round
+ * ## 为什么驱逐按整轮进行
  *
- * A round's text is a sequence of 〔名字〕 segments. Cutting it at an
- * arbitrary character leaves a half-sentence in memory that the next
- * round will treat as the state of the scene; cutting at a round boundary
- * leaves a coherent (if older) picture. The window may therefore hold
- * fewer characters than the limit — that is the point.
+ * 一轮的文本是一串 〔名字〕 段落。在任意字符处切断，会在记忆里
+ * 留下半句话，下一轮会把它当作场景的状态；在一轮的边界处切断，
+ * 留下的是一幅连贯（虽然旧一些）的图景。因此窗口装下的字符数
+ * 可能少于上限 —— 这正是目的所在。
  *
- * ## Why the fold is lazy
+ * ## 为什么折叠是惰性的
  *
- * Folding `backlog` into `summary` costs one LLM call. Doing it at
- * eviction time would be inside the run's `finally`, where a slow call
- * delays nothing visible but the error surface is ugly (the reply stream
- * is already closed). Doing it at the START of the next round keeps the
- * call inside a live fiber with real error handling — the cost is that
- * the round after an eviction waits a few extra seconds, which is
- * amortized: eviction only happens once the window fills.
+ * 把 `backlog` 折进 `summary` 要花一次 LLM 调用。放在驱逐时刻做，
+ * 就会落在运行的 `finally` 里：慢调用不会延误任何看得见的东西，
+ * 但错误处理面很难看（回复流已关闭）。放在下一轮的开头做，
+ * 调用就能留在一个有真正错误处理的活跃 fiber 里 —— 代价是
+ * 驱逐后的那一轮多等几秒，而这可以摊平：只有窗口填满才会驱逐。
  */
 
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 
-/** Schema version of the on-disk file. */
+/** 磁盘文件的 schema 版本号。 */
 export const MEMORY_VERSION = 1;
 
-/** Characters of verbatim recent rounds kept for injection. */
+/** 逐字保留供注入的最近各轮的字符数。 */
 export const MEMORY_WINDOW_CHARS = 4800;
 
-/** Characters a folded summary may occupy. */
+/** 折叠后的梗概可占用的字符数。 */
 export const MEMORY_SUMMARY_CHARS = 800;
 
-/** A memory untouched for this long is dead: expired on load. */
+/** 记忆闲置这么久即告死亡：加载时过期。 */
 export const MEMORY_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
- * Map a team's retention option to the TTL `readMemory` understands.
+ * 把团队的保留选项映射成 `readMemory` 能理解的 TTL。
  *
- * `memoryTtlDays` is what the team record stores (a scalar the panel edits):
- * `0` means "keep forever", a positive number is the idle window in days,
- * anything else falls back to the shipped default week. `Infinity` — not a
- * huge number — is the "never expire" sentinel, because `Number.isFinite`
- * guards in `readMemory` would otherwise swallow it into the default.
- * @param {unknown} days the team record's `memoryTtlDays`
- * @returns {number} TTL in ms, or `Infinity` for keep-forever
+ * `memoryTtlDays` 是团队记录里存的值（面板编辑的标量）：
+ * `0` 表示"永久保留"，正数是以天计的闲置窗口，
+ * 其他任何值都回退到随附的默认一周。`Infinity` —— 而不是某个
+ * 巨大的数 —— 才是"永不过期"的哨兵值，否则 `readMemory` 里的
+ * `Number.isFinite` 守卫会把它吞成默认值。
+ * @param {unknown} days 团队记录的 `memoryTtlDays`
+ * @returns {number} 以毫秒计的 TTL，永久保留时为 `Infinity`
  */
 export function memoryTtlMsFromDays(days) {
   const n = Number(days);
@@ -71,16 +66,15 @@ export function memoryTtlMsFromDays(days) {
   return n === 0 ? Infinity : n * 24 * 60 * 60 * 1000;
 }
 
-/** Evicted batches kept while their fold keeps failing. Beyond this, the oldest is dropped for real. */
+/** 折叠持续失败时保留的被驱逐批次。超过此数，最旧的批次会被真正丢弃。 */
 export const MEMORY_BACKLOG_MAX = 3;
 
 /**
- * A safe file name for one session's memory.
+ * 单个会话记忆的安全文件名。
  *
- * Session ids are host-shaped, not file-shaped. The name keeps the
- * characters that are safe everywhere, replaces the rest, caps the length,
- * and appends a short digest of the ORIGINAL id so two long ids that
- * sanitize to the same prefix still get two files.
+ * 会话 id 是宿主形状的，不是文件形状的。文件名保留在哪儿都安全的
+ * 字符，替换其余字符，限制长度，并附加原始 id 的短摘要，
+ * 这样两个清洗后前缀相同的长 id 仍会得到两个文件。
  * @param {string} sessionId
  */
 export function memoryFileName(sessionId) {
@@ -93,14 +87,14 @@ export function memoryFileName(sessionId) {
   return `${safe || "session"}-${digest.toString(16).padStart(8, "0")}.json`;
 }
 
-/** A fresh, empty memory. */
+/** 一份全新的空记忆。 */
 export function emptyMemory() {
   return { v: MEMORY_VERSION, seq: 0, summary: "", rounds: [], backlog: [], updatedAt: 0 };
 }
 
 /**
- * Validate a loaded file into the current shape. Anything unreadable
- * becomes an empty memory — a corrupt memory must never break a turn.
+ * 把加载的文件校验成当前结构。任何读不懂的东西都变成空记忆 ——
+ * 损坏的记忆绝不能弄垮一轮。
  * @param {unknown} raw
  */
 export function normalizeMemory(raw) {
@@ -130,10 +124,10 @@ export function normalizeMemory(raw) {
 }
 
 /**
- * What one round contributes, verbatim. The user's words ride along:
- * without them, "好的，就这么办" is memory of nothing.
- * @param {string} input the user's message that round
- * @param {string} output everything the room said, protocol markers included
+ * 单轮贡献的内容，逐字保留。用户的话也要一并记下：
+ * 没有它们，"好的，就这么办"就是一段关于空无的记忆。
+ * @param {string} input 那一轮用户的发言
+ * @param {string} output 房间里说的一切，含协议标记
  */
 export function roundText(input, output) {
   const said = typeof input === "string" ? input.trim() : "";
@@ -142,14 +136,13 @@ export function roundText(input, output) {
 }
 
 /**
- * Add one round, then trim the window by dropping the OLDEST WHOLE rounds.
- * Mutates `memory` (the runtime keeps it as its cached source of truth) and
- * returns the evicted texts as one batch string — "" when nothing was
- * evicted.
- * @param {object} memory a live memory object
+ * 追加一轮，然后通过丢弃最旧的**整轮**来裁剪窗口。
+ * 会修改 `memory`（运行时把它当作缓存的事实来源），并把被驱逐的
+ * 文本作为一个批次字符串返回 —— 没有驱逐时为 ""。
+ * @param {object} memory 一个活跃的记忆对象
  * @param {{input: string, output: string}} round
  * @param {number} [windowChars]
- * @returns {string} the evicted text, "" when the window still fits
+ * @returns {string} 被驱逐的文本，窗口仍装得下时为 ""
  */
 export function appendRound(memory, round, windowChars = MEMORY_WINDOW_CHARS) {
   memory.seq += 1;
@@ -165,12 +158,11 @@ export function appendRound(memory, round, windowChars = MEMORY_WINDOW_CHARS) {
 }
 
 /**
- * The text injected ahead of the current turn, or "" when there is nothing.
+ * 注入到当前轮之前的文本，没有内容时为 ""。
  *
- * The markers use 【】 on purpose: the segment protocol owns 〔〕, and the
- * two must never be mistakable for each other — the parser only ever reads
- * the OUTPUT, but a human pasting this back in should not be able to forge
- * a speaker either.
+ * 标记刻意用 【】：段落协议归 〔〕 所有，两者绝不能混淆 ——
+ * 解析器只读 OUTPUT，但人工把这段文本贴回去时，
+ * 也不该能伪造出一个说话者。
  * @param {object} memory
  * @returns {string}
  */
@@ -189,8 +181,8 @@ export function renderMemoryBlock(memory) {
 }
 
 /**
- * The user-side prompt for the fold call. Demands bare prose: a list or a
- * heading would ride inside `[梗概]` and read like script stage directions.
+ * 折叠调用所用用户侧提示词。要求纯正文：列表或标题会混进
+ * `[梗概]` 里，读起来像剧本的舞台提示。
  * @param {{oldSummary: string, batch: string, cap?: number}} input
  */
 export function summaryPrompt({ oldSummary, batch, cap = MEMORY_SUMMARY_CHARS }) {
@@ -207,7 +199,7 @@ export function summaryPrompt({ oldSummary, batch, cap = MEMORY_SUMMARY_CHARS })
   ].join("\n");
 }
 
-/** Clamp a fold result to the cap, and strip wrapping quotes some models add. */
+/** 把折叠结果收紧到上限内，并剥去某些模型加的包裹引号。 */
 export function clampSummary(text, cap = MEMORY_SUMMARY_CHARS) {
   let out = typeof text === "string" ? text.trim() : "";
   if (out.length >= 2 && ((out.startsWith("「") && out.endsWith("」")) || (out.startsWith("『") && out.endsWith("』")))) {
@@ -217,9 +209,9 @@ export function clampSummary(text, cap = MEMORY_SUMMARY_CHARS) {
 }
 
 /**
- * Fold an evicted batch into the summary. Mutates `memory`.
+ * 把一个被驱逐的批次折叠进梗概。会修改 `memory`。
  * @param {object} memory
- * @param {string} text the model's fold output
+ * @param {string} text 模型的折叠输出
  * @param {number} [cap]
  */
 export function applySummary(memory, text, cap = MEMORY_SUMMARY_CHARS) {
@@ -227,19 +219,18 @@ export function applySummary(memory, text, cap = MEMORY_SUMMARY_CHARS) {
   memory.backlog = [];
 }
 
-/** Drop the oldest backlog batch when the fold has failed too many times. */
+/** 折叠失败次数过多时，丢弃最旧的 backlog 批次。 */
 export function trimBacklog(memory, max = MEMORY_BACKLOG_MAX) {
   while (Array.isArray(memory.backlog) && memory.backlog.length > max) {
     memory.backlog.shift();
   }
 }
 
-/* ---------------------------------------------------------------- io */
+/* ---------------------------------------------------------------- 读写 */
 
 /**
- * Read one session's memory, or a fresh one. Expired memory is deleted on
- * sight and answered as fresh: a memory past its TTL is not history, it is
- * clutter with old plot in it.
+ * 读取单个会话的记忆，或一份全新的。过期记忆当场删除并按全新处理：
+ * 超过 TTL 的记忆不是历史，是带着旧剧情的杂物。
  * @param {string} dir
  * @param {string} sessionId
  * @param {{now?: number, ttlMs?: number}} [opts]
@@ -270,8 +261,8 @@ export async function readMemory(dir, sessionId, opts = {}) {
 }
 
 /**
- * Persist one memory. Temp-file-then-rename: a crash mid-write leaves the
- * old file intact, never a truncated half of the conversation.
+ * 持久化一份记忆。先写临时文件再改名：写到一半崩溃时旧文件原封不动，
+ * 绝不会留下被截断的半段对话。
  * @param {string} dir
  * @param {string} sessionId
  * @param {object} memory
@@ -292,7 +283,7 @@ export async function writeMemory(dir, sessionId, memory) {
   await fs.rename(tmp, file);
 }
 
-/** Delete one session's memory. Absent is fine. */
+/** 删除单个会话的记忆。不存在也没关系。 */
 export async function removeMemory(dir, sessionId) {
   await fs.rm(path.join(dir, memoryFileName(sessionId)), { force: true }).catch(() => {});
 }

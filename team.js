@@ -1,79 +1,74 @@
 /**
- * dsh-waifu-agents — team definitions, the selection pipeline, and storage.
+ * dsh-waifu-agents — 团队定义、选择器流水线与存储。
  *
- * Leaf module on purpose: it imports nothing from `index.js` and nothing
- * outside `node:` builtins, so it can be unit-tested offline and so `index.js`
- * can import it without a cycle. Anything it needs from the host (the persona
- * matcher, the logger) arrives as an argument.
+ * 刻意做成叶子模块：它不从 `index.js` 导入任何东西，也不依赖 `node:` 内置
+ * 模块之外的任何包，因此可以离线做单元测试，`index.js` 导入它也不会形成
+ * 循环。它需要的宿主能力（人设匹配器、日志器）都以参数形式传入。
  *
- * Two things live here, and they are two different kinds of thing:
+ * 这里有两样东西，而且它们是两种不同性质的东西：
  *
- *   1. **Storage.** `teams.json` beside `overrides.json`. It holds `selection`
- *      (what the user picked) and NEVER the resolved member list as an input —
- *      the resolved list is derived on every read. A team whose definition is a
- *      group follows the group: edit a persona's `group:` in the panel and the
- *      next run picks the change up. That is the whole reason groups are usable
- *      as an execution unit without a second store.
+ *   1. **存储。** `teams.json`，与 `overrides.json` 并排。它保存 `selection`
+ *      （用户选了什么），并且绝不把解析后的成员列表当作输入——解析出的列表
+ *      在每次读取时重新推导。定义是某个分组的团队会跟随分组：在面板里改
+ *      一个人设的 `group:`，下一次运行就会吸收这个改动。这正是分组无需
+ *      第二份存储就能作为执行单元使用的全部原因。
  *
- *   2. **The selection pipeline.** collect → dedupe → filter → sort → size.
- *      Its output deliberately separates "what will run" from "what the
- *      definition named but cannot run" — a silently shrinking team is the
- *      failure this project keeps rejecting.
+ *   2. **选择器流水线。** 收集 → 去重 → 过滤 → 排序 → 定容。
+ *      它的输出刻意区分「哪些会运行」与「定义点了名但无法运行的人」——
+ *      团队悄悄缩水是这个项目一直在拒绝的失败模式。
  *
- * The v2 text layer is gone: there is no member prompt, no receipt protocol and
- * no transcript renderer here any more, because no member is ever started on her
- * own. A team is one simulated call, and the prompt for it lives in
- * `team-simulate.js`; this module only answers *who is in the room*.
+ * v2 文本层已经移除：这里不再有成员提示词、回执协议和对话记录渲染器，
+ * 因为再也不会单独启动任何一个成员。团队就是一次模拟调用，其提示词在
+ * `team-simulate.js` 中；本模块只回答 *谁在房间里*。
  */
 
 import fs from "node:fs";
 import path from "node:path";
 
-/* ------------------------------------------------------------- constants */
+/* ------------------------------------------------------------- 常量 */
 
-/** The file this plugin owns for team definitions, beside `overrides.json`. */
+/** 本插件用于存放团队定义的文件，与 `overrides.json` 并排。 */
 export const TEAM_FILE = "teams.json";
 /**
- * The append-only run ledger, beside `teams.json`.
+ * 追加式运行台账，与 `teams.json` 并排。
  *
- * One JSON object per line: what each team run cost, how long it took, and how
- * it ended. JSONL rather than one JSON array on purpose — a killed process can
- * only ever leave a half-written **last** line, and the earlier lines stay
- * readable, which is not true of rewriting an array.
+ * 每行一个 JSON 对象：每次团队运行花了多少、耗时多久、如何收场。刻意用
+ * JSONL 而不是一整个 JSON 数组——被杀掉的进程最多只会在 **最后** 一行留下
+ * 半截内容，之前的行仍然可读；重写数组做不到这一点。
  */
 export const RUN_LOG_FILE = "runs.jsonl";
-/** Bumped only when a reader older than the writer would misread the file. */
+/** 只有当更旧的读取方会误读新文件时才递增。 */
 export const TEAM_VERSION = 1;
-/** Teams are cheap; a cap keeps a corrupt file from filling the panel. */
+/** 团队很廉价；设个上限防止损坏的文件塞满面板。 */
 export const TEAM_LIMIT = 100;
-/** Longest team name the panel accepts. */
+/** 面板接受的最长团队名。 */
 export const NAME_LIMIT = 60;
-/** What to do when an explicit `maxTeamSize` is exceeded. */
+/** 显式设置的 `maxTeamSize` 被超出时的处理方式。 */
 export const CAP_POLICIES = ["refuse", "truncate"];
-/** @deprecated The two presentation modes merged into one: members converse freely on the shared bus. Kept only to read legacy teams.json. */
+/** @deprecated 两种展示模式已合并为一种：成员在共享总线上自由对话。仅保留用于读取旧版 teams.json。 */
 /**
- * The UI's pseudo-group for "no group at all". It is not a name a persona can
- * have (`group:` is free text, but the picker maps empty to this sentinel), so
- * dispatching to it would pull every untagged persona in at once.
+ * UI 对「完全没有分组」的伪分组。这不是一个人设可以拥有的名字（`group:` 是
+ * 自由文本，但选择器把空值映射成这个哨兵值），所以向它派发会一次拉进所有
+ * 未打标签的人设。
  */
 export const UNGROUPED = "__none__";
-/** Collapse whitespace and trim — the same reading `index.js` uses. */
+/** 折叠空白并去除首尾——与 `index.js` 的读取方式一致。 */
 export function oneLine(value) {
   return typeof value === "string" ? value.replace(/\s+/gu, " ").trim() : "";
 }
 
-/** A blank value, in any of the shapes JSON can carry it. */
+/** JSON 能承载的任何形状下的空值。 */
 function blank(value) {
   return value === undefined || value === null || oneLine(value) === "";
 }
 
 /**
- * The sort key the roster uses, so a team and the picker agree on order.
+ * 花名册使用的排序键，让团队与选择器对顺序达成一致。
  *
- * `order` is the persona's own front-matter number; a persona without one sorts
- * last rather than first, which is what the picker does (`choosableRows`). The
- * name is the tie-break, and `localeCompare` is called with an explicit locale
- * so a Chinese name and a Latin one do not swap places between two runs.
+ * `order` 是人设自带的 front-matter 编号；没有编号的人设排在最后而不是
+ * 最前，这与选择器的做法一致（`choosableRows`）。名字是平局裁决，并且
+ * `localeCompare` 显式传入 locale，这样中文名和拉丁名在两次运行之间不会
+ * 互换位置。
  */
 export function orderKey(row) {
   return typeof row?.order === "number" && Number.isFinite(row.order)
@@ -90,7 +85,7 @@ export function compareRows(a, b) {
   );
 }
 
-/** The empty store, and the shape every reader may rely on. */
+/** 空存储，也是每个读取方都可以依赖的形状。 */
 export function emptyStore() {
   return {
     version: TEAM_VERSION,
@@ -101,12 +96,11 @@ export function emptyStore() {
 }
 
 /**
- * Read a store, tolerating anything.
+ * 读取一个存储，尽最大容忍。
  *
- * A missing file, a truncated file, or a file someone edited by hand all mean
- * the same thing to a reader: keep everything that parses, drop the rest, and
- * never fail a boot over it. The panel is where a user finds out — the same
- * choice `readOverrides()` makes one directory over.
+ * 文件缺失、文件被截断、或文件被人手改过，对读取方来说都是同一件事：保留
+ * 所有能解析的，丢弃其余，绝不为此让启动失败。用户是在面板里发现问题的——
+ * 与隔壁目录的 `readOverrides()` 做出同样的选择。
  */
 export function adoptStore(parsed) {
   const out = emptyStore();
@@ -129,11 +123,11 @@ export function adoptStore(parsed) {
   return out;
 }
 
-/** One team, with every field a reader may rely on present. */
+/** 单个团队，读取方可依赖的每个字段都在。 */
 
 /**
- * Normalize the retention field: a non-negative integer of days, `0` meaning
- * "keep forever", anything else the shipped default of 7.
+ * 归一化保留期字段：非负整数天数，`0` 表示「永久保留」，其余一律取随附的
+ * 默认值 7。
  * @param {unknown} value
  */
 function memoryTtlDaysOf(value) {
@@ -143,14 +137,13 @@ function memoryTtlDaysOf(value) {
 }
 
 /**
- * Normalize the per-team size override: `null` when the team should follow
- * the store-wide cap, a safe integer ≥ 2 when it caps itself.
+ * 归一化每队人数覆盖：当团队应跟随全库上限时为 `null`，自设上限时为
+ * ≥ 2 的安全整数。
  *
- * Unlike the global `maxTeamSize` this never refuses a save: the field is an
- * OVERRIDE, and a malformed one (1, 0, "3 people", 2.5) reads as "no opinion
- * of its own" — the global setting answers instead. A capacity of 1 still
- * has no meaning here (`|team| < 2` already is single mode), so it is
- * normalized away rather than stored to say one thing and do another.
+ * 与全局 `maxTeamSize` 不同，这里绝不拒绝保存：该字段是覆盖项，格式错误的
+ * 值（1、0、"3 people"、2.5）会被读成「本队没有自己的意见」——由全局设置
+ * 代替回答。容量 1 在这里同样没有意义（`|team| < 2` 已经是单人模式），所以
+ * 直接归一化掉，而不是存下来口是心非。
  * @param {unknown} value
  * @returns {number|null}
  */
@@ -163,38 +156,37 @@ function maxMembersOf(value) {
 
 export function adoptTeam(name, raw) {
   /*
-   * `thinking` used to be a per-team scene option ("stage" / "ventriloquist").
-   * It is gone: there is exactly one way a team talks — members speak for
-   * themselves on the shared bus. Old files still carry the field, so it is
-   * accepted on read and simply not carried forward; the next save drops it.
+   * `thinking` 曾经是每队的场景选项（"stage" / "ventriloquist"）。
+   * 它已移除：团队说话的方式只有一种——成员在共享总线上为自己发声。旧文件
+   * 仍带有该字段，因此读取时接受它但不向后传递；下一次保存会把它丢掉。
    */
   return {
     name,
     selection: adoptSelection(raw?.selection),
-    // personaId -> role sentence. A missing role is not an error: the member
-    // still gets the task, it just has no speciality line in its prompt.
+    // personaId -> 角色描述句。缺失角色不是错误：成员仍然会拿到任务，
+    // 只是提示词里没有特长那一行。
     roles: adoptMap(raw?.roles),
-    // personaId -> glob. The declared lane for that member's writes.
+    // personaId -> glob。该成员写入时声明的通道。
     writeScope: adoptMap(raw?.writeScope),
-    // `cards` is the only surviving scene option: one card per run.
+    // `cards` 是唯一存活的场景选项：每次运行一张卡。
     scenes: { cards: "perRun" },
-    // Team-level standing background (set once when the team is created). It is
-    // injected into every member's prompt on every run, so a fact like "托尔和
-    // 康娜彼此不知道是什么关系" is stated once rather than repeated per task.
+    // 团队级常驻背景（创建团队时设置一次）。它会在每次运行时注入每个成员
+    // 的提示词，所以像「托尔和康娜彼此不知道是什么关系」这样的事实只需
+    // 陈述一次，不必在每个任务里重复。
     background: oneLine(raw?.background) || "",
-    // Whether this team carries memory across rounds (see `team-memory.js`).
-    // Absent means ON — memory is the default experience; `false` opts a team
-    // back out to the old stateless-per-round shape and its constant cost.
+    // 该团队是否跨回合携带记忆（见 `team-memory.js`）。
+    // 缺省即开启——记忆是默认体验；`false` 让团队退回旧的每回合无状态
+    // 形态及其固定开销。
     memory: raw?.memory !== false,
-    // How many idle days one session's memory survives (0 = keep forever).
-    // The panel edits it like the paging number: any non-negative integer.
-    // Absent or malformed falls back to the shipped default of 7 — the same
-    // default `memoryTtlMsFromDays` applies when the field is missing.
+    // 一次会话的记忆能存活多少个闲置日（0 = 永久保留）。
+    // 面板像编辑分页数字一样编辑它：任意非负整数。
+    // 缺失或格式错误回退到随附默认值 7——字段缺失时 `memoryTtlMsFromDays`
+    // 采用同样的默认值。
     memoryTtlDays: memoryTtlDaysOf(raw?.memoryTtlDays),
-    // Per-team size cap overriding the store-wide `maxTeamSize` (null = follow
-    // the global setting). A chat duo stays at 2 while a story team runs 5.
+    // 每队人数上限，覆盖全库的 `maxTeamSize`（null = 跟随全局设置）。
+    // 聊天二人组保持 2 人，而剧情团队可以跑 5 人。
     maxMembers: maxMembersOf(raw?.maxMembers),
-    // Audit only. Execution never reads this — see the module doc.
+    // 仅用于审计。执行流程从不读取它——见模块文档。
     lastResolved: Array.isArray(raw?.lastResolved)
       ? raw.lastResolved.map(oneLine).filter((id) => id !== "")
       : [],
@@ -215,7 +207,7 @@ export function adoptSelection(input) {
   return out;
 }
 
-/** A `{ key: text }` map with blank entries dropped. */
+/** 剔除空白条目后的 `{ key: text }` 映射。 */
 function adoptMap(input) {
   const out = {};
   if (input === null || typeof input !== "object" || Array.isArray(input)) return out;
@@ -237,11 +229,11 @@ export function readStore(file) {
 }
 
 /**
- * Write the store so the file on disk is never half of either version.
+ * 写入存储，确保磁盘上的文件永远不会是两个版本各一半。
  *
- * Same staging-and-rename as `writeAtomic` in `index.js`, and for the same
- * reason: a reader that catches a partially written `teams.json` would have to
- * guess whether the user has one team or none.
+ * 与 `index.js` 中的 `writeAtomic` 相同的先暂存再改名，理由也相同：一个
+ * 捕获到写了一半的 `teams.json` 的读取方将不得不去猜用户是有一个团队
+ * 还是没有。
  */
 export function writeStore(file, store) {
   try {
@@ -262,14 +254,13 @@ export function writeStore(file, store) {
 }
 
 /**
- * Why this store cannot be used, or `null` when it can.
+ * 这个存储不能使用的原因，可用时返回 `null`。
  *
- * The only refusal in P1 is `maxTeamSize < 2`, and it refuses on purpose rather
- * than clamping. A capacity of 1 does not mean "delegate one member" — `|team|
- * < 2` already means single mode — so the number expresses "never run as a
- * team", which has a direct expression (leave team mode off). Clamping to 2
- * would make the file say one thing and the plugin do another, which is the
- * class of bug this whole feature is built to avoid.
+ * P1 里唯一的拒绝条件是 `maxTeamSize < 2`，而且它是刻意拒绝而不是钳制。
+ * 容量 1 不意味着「委派一名成员」——`|team| < 2` 已经是单人模式——所以
+ * 这个数字表达的是「永远别以团队方式运行」，而那件事有直接的表达方式
+ * （不开团队模式）。钳制成 2 会让文件说的和插件做的不一致，这正是整个
+ * 功能要规避的 bug 类型。
  */
 export function storeProblem(store) {
   const cap = store?.maxTeamSize;
@@ -287,26 +278,24 @@ export function findTeam(store, name) {
 }
 
 /**
- * Which stored team a `save` writes into, and whether that save is a rename.
+ * 一次 `save` 写入哪个已存的团队，以及这次保存是否为改名。
  *
- * A team has no id — its name IS its identity in the file — so "save this
- * editor" is ambiguous on its own: the new name may match nothing (a rename) or
- * nothing at all (a create). Keying on the name alone made every rename look
- * like a create, which left the old entry behind and added a second team that
- * duplicated it under the new name.
+ * 团队没有 id——它的名字就是它在文件中的身份——所以「保存这个编辑器」
+ * 本身有歧义：新名字可能匹配不到任何条目（改名），也可能什么都不是
+ * （创建）。只按名字做键会让每次改名看起来都像创建，结果旧条目留在原处，
+ * 又多出一个以新名字重复它的团队。
  *
- * `original` is the name the editor was opened with, and closes the gap:
+ * `original` 是编辑器打开时的名字，用它弥补这个缺口：
  *
- * - `original` empty, or equal to `name` → ordinary create-or-replace by name;
- * - `original` different → rename in place; it is an error if the old entry is
- *   gone (deleted elsewhere) or if the new name is already taken (that would
- *   silently overwrite a DIFFERENT team).
+ * - `original` 为空，或等于 `name` → 按名字普通的创建或替换；
+ * - `original` 不同 → 原地改名；若旧条目已消失（在别处被删）或新名字已被
+ *   占用（那会悄悄覆盖一个不同的团队），则为错误。
  *
- * @param {Array} teams - the store's teams, in file order.
- * @param {string} name - the name being written.
- * @param {string} original - the name the editor opened with.
- * @returns {{at: number, renamed: boolean, error: string|null}} `at` is the
- *   index to write (-1 = append), never the position of a conflicting team.
+ * @param {Array} teams - 存储中的团队，按文件顺序。
+ * @param {string} name - 要写入的名字。
+ * @param {string} original - 编辑器打开时的名字。
+ * @returns {{at: number, renamed: boolean, error: string|null}} `at` 是要
+ *   写入的下标（-1 = 追加），绝不是冲突团队所在的位置。
  */
 export function saveTarget(teams, name, original) {
   const list = Array.isArray(teams) ? teams : [];
@@ -326,18 +315,15 @@ export function saveTarget(teams, name, original) {
 }
 
 /**
- * Where the global default has to move when a team is renamed.
+ * 团队改名时全局默认值必须跟着移动的情形。
  *
- * A team's preset id is DERIVED from its name (`团队-<name>`), so a rename
- * unregisters the old preset and registers a new one under a different id. The
- * default is stored as an id, which leaves a default that named the old one
- * pointing at nothing — and a dangling default is not a cosmetic problem: the
- * registry refuses EVERY new session with `agent-preset/not-found` rather than
- * falling back to the first row.
+ * 团队的预设 id 是从名字 **派生** 的（`团队-<name>`），因此改名会注销旧
+ * 预设、以不同 id 注册新预设。默认值以 id 形式保存，于是指向旧者的默认值
+ * 就悬空了——悬空的默认值不是小事：注册表会以 `agent-preset/not-found`
+ * 拒绝每一个新会话，而不是回退到第一行。
  *
- * Returns `null` when there is nothing to move, which is the common case (the
- * default names a persona, or another team) and what makes the caller safe to
- * run unconditionally.
+ * 无需移动时返回 `null`，这是常见情形（默认值指向某个人设或另一个团队），
+ * 也让调用方可以无条件安全运行。
  *
  * @param {{defaultId?: string|null, from?: string, to?: string}} input
  * @returns {{from: string, to: string} | null}
@@ -353,13 +339,12 @@ export function defaultRenameFollow({ defaultId, from, to }) {
 }
 
 /**
- * Whether the default names this team — the delete half of the same question.
+ * 默认值是否指向这个团队——同一问题的删除侧。
  *
- * Same reason as {@link defaultRenameFollow}: deleting a team whose preset is
- * the default would leave the field naming an id nothing registers, so new
- * sessions fail with nothing left on screen to click. Both sides are compared
- * as ids because that is what the field holds; the name is not enough, since a
- * persona file may legally carry the same string.
+ * 理由同 {@link defaultRenameFollow}：删除一个其预设正是默认值的团队，会让
+ * 该字段指向一个无人注册的 id，新会话将失败且屏幕上没有任何可点的东西。
+ * 两侧都按 id 比较，因为字段里存的就是 id；只比名字不够，因为人设文件
+ * 完全可能合法地携带同一个字符串。
  *
  * @param {{defaultId?: string|null, presetId?: string}} input
  */
@@ -369,7 +354,7 @@ export function defaultNamesTeam({ defaultId, presetId }) {
   return held !== "" && preset !== "" && held === preset;
 }
 
-/** Every group name the current directory can be dispatched by. */
+/** 当前目录可以据以派发的每个分组名。 */
 export function availableGroups(roster) {
   const names = new Set();
   for (const row of roster ?? []) {
@@ -379,26 +364,25 @@ export function availableGroups(roster) {
   return [...names].sort((a, b) => a.localeCompare(b, "zh-Hans-CN"));
 }
 
-/* ----------------------------------------------------- selection pipeline */
+/* ----------------------------------------------------- 选择器流水线 */
 
 /**
- * Expand one selection into member rows.
+ * 把一个选择器展开成成员行。
  *
- * The pipeline is the specification, in this order: collect (members ∪ groups)
- * → dedupe by persona id → filter out what cannot mount → sort → size. Dedupe
- * before filter so a persona reachable by two paths is reported once.
+ * 流水线即规格，顺序如下：收集（成员 ∪ 分组）→ 按人设 id 去重 → 过滤掉
+ * 无法挂载的 → 排序 → 定容。先去重后过滤，这样经两条路径可达的同一人设
+ * 只报告一次。
  *
- * `strict` is the difference between the two callers, and it is not cosmetic:
- *   - `strict: true` — the user or the model just typed this. An unresolvable
- *     name is a typo, so it fails the whole call with the candidate list. This
- *     is design doc §7.4's "group not found → error", extended to named personas.
- *   - `strict: false` — this came out of a stored definition that may have
- *     drifted (a persona was archived, renamed, or its `group:` edited). The
- *     member is dropped and *named* in `removed`, never silently.
+ * `strict` 区分两类调用方，而且不是装饰性的差异：
+ *   - `strict: true` ——这是用户或模型刚输入的。解析不了的名字就是笔误，
+ *     所以让整次调用带着候选列表失败。这是设计文档 §7.4 的「分组未找到 →
+ *     报错」扩展到具名人设。
+ *   - `strict: false` ——这来自一个可能已漂移的存储定义（人设被归档、改名，
+ *     或其 `group:` 被编辑）。该成员被剔除并在 `removed` 里 *点名*，绝不静默。
  *
  * @param {object} input
  * @param {{kind: string, ref: string}[]} input.selection
- * @param {object[]} input.roster rows in `listFiles()` shape
+ * @param {object[]} input.roster `listFiles()` 形状的行
  * @param {boolean} [input.strict]
  * @returns {{ok: boolean, error?: string, hint?: string, members: object[],
  *   removed: object[], unknownGroups: string[], unknownRefs: string[]}}
@@ -505,14 +489,12 @@ export function expandSelection({ selection, roster, strict = false }) {
 }
 
 /**
- * Resolve a stored team for one session.
+ * 为一次会话解析一个已存的团队。
  *
- * Returns the split the callers need: `members` are the rows that will run,
- * `removed` are the ones the definition named and the directory cannot serve,
- * `drift` is what changed since the last dispatch, and `notices` are the
- * sentences the user is owed. `single` is the fallback decision — `|team| < 2`
- * — and it is computed here, once, so that the tool registration, the prompt
- * section, and the report cannot disagree about it (gate S3 ≡ H4).
+ * 返回调用方需要的切分：`members` 是将要运行的行，`removed` 是定义点了名
+ * 但目录无法提供的，`drift` 是自上次派发以来的变化，`notices` 是欠用户的
+ * 说明句。`single` 是兜底判定——`|team| < 2`——它在这里只计算一次，这样
+ * 工具注册、提示词段落和报告就不可能对它各执一词（gate S3 ≡ H4）。
  */
 export function resolveTeam({ team, roster, coordinator, store }) {
   const selection = Array.isArray(team?.selection) ? team.selection : [];
@@ -520,12 +502,10 @@ export function resolveTeam({ team, roster, coordinator, store }) {
   const notices = [];
 
   /*
-   * A group the directory has never heard of is a typo, and a typo must not be
-   * absorbed (gate S4): falling back to single mode would let the user believe a
-   * team ran. A persona that has since been deleted is ordinary drift and is
-   * only announced (design doc §7.8) — the two are asymmetric on purpose, because
-   * a group name is a *namespace* reference that cannot be interpreted at all,
-   * while a persona ref points at something that demonstrably existed.
+   * 目录从未听说过的分组是笔误，而笔误绝不能被吸收（gate S4）：回退到单人
+   * 模式会让用户误以为团队运行过了。此后被删除的人设是普通的漂移，只做
+   * 公告（设计文档 §7.8）——两者刻意不对称，因为分组名是 *命名空间* 引用，
+   * 根本无从解释，而人设引用指向的是确实存在过的东西。
    */
   if (expanded.unknownGroups.length > 0) {
     return {
@@ -557,10 +537,9 @@ export function resolveTeam({ team, roster, coordinator, store }) {
       };
   if (drift.added.length > 0 || drift.removed.length > 0) {
     /*
-     * Ids are what the audit snapshot stores (a rename must not corrupt the
-     * record), but a notice is read by a person, so it says names. An id the
-     * roster no longer holds falls back to itself — that is exactly the
-     * "removed" case, and the raw id is the most honest thing left to show.
+     * id 是审计快照保存的东西（改名不能破坏记录），但通知是给人读的，所以
+     * 写名字。花名册不再持有的 id 就回退为它自身——那正是「被移除」的情形，
+     * 原始 id 是剩下最能诚实展示的东西。
      */
     const nameOf = new Map((Array.isArray(roster) ? roster : []).map((row) => [oneLine(row?.id), oneLine(row?.name)]));
     const label = (id) => nameOf.get(id) || id;
@@ -571,11 +550,10 @@ export function resolveTeam({ team, roster, coordinator, store }) {
   }
 
   /*
-   * The cap is per team first, global second: a team that states its own
-   * `maxMembers` overrides `store.maxTeamSize`, and one that does not (the
-   * normalized `null`) follows the store. `adoptTeam` guarantees the shape,
-   * but resolveTeam also runs on definitions rebuilt from older files, so the
-   * guard here repeats the invariant instead of trusting it.
+   * 上限先看每队，再看全局：自述 `maxMembers` 的团队覆盖 `store.maxTeamSize`，
+   * 没有自述的（归一化后的 `null`）跟随全库。`adoptTeam` 保证形状，但
+   * resolveTeam 也会在从更旧文件重建的定义上运行，所以这里的守卫重复一遍
+   * 不变式而不是盲目信任。
    */
   const cap =
     Number.isSafeInteger(team?.maxMembers) && team.maxMembers >= 2
@@ -597,8 +575,8 @@ export function resolveTeam({ team, roster, coordinator, store }) {
         drift,
       };
     }
-    // `truncate` keeps the first `cap` in order and says who was skipped: a
-    // report that omits them would be indistinguishable from a team that small.
+    // `truncate` 按顺序保留前 `cap` 名并说明谁被跳过了：一份省略她们的报告
+    // 与一个真的只有这么小的团队无法区分。
     const skipped = members.slice(cap);
     members = members.slice(0, cap);
     truncated = skipped;
@@ -609,9 +587,9 @@ export function resolveTeam({ team, roster, coordinator, store }) {
 
   const coordinatorId = oneLine(coordinator?.id);
   const inTeam = coordinatorId !== "" && members.some((row) => row.id === coordinatorId);
-  // Size is |team|, full stop. v3 used to also report who would get a child run
-  // (everyone except the coordinator); nobody is started on their own any more,
-  // so the only question left is how many voices the room has.
+  // 人数就是 |team|，仅此而已。v3 曾经还会报告谁会得到子运行（除协调者外的
+  // 所有人）；现在已经不会单独启动任何人了，所以剩下唯一的问题是房间里
+  // 有几个声音。
   const single = members.length < 2;
 
   return {
@@ -622,8 +600,8 @@ export function resolveTeam({ team, roster, coordinator, store }) {
     truncated,
     notices,
     drift,
-    // Whether the session's own persona is one of the speakers. Display only:
-    // in v3 she speaks like everybody else, she does not lead the room.
+    // 会话自身的人设是否是发言者之一。仅用于展示：
+    // 在 v3 中她和其他人一样发言，并不领导房间。
     coordinator: {
       id: coordinatorId || null,
       name: oneLine(coordinator?.name) || null,
@@ -634,4 +612,4 @@ export function resolveTeam({ team, roster, coordinator, store }) {
   };
 }
 
-/* --------------------------------------------------------------- routing */
+/* --------------------------------------------------------------- 路由 */

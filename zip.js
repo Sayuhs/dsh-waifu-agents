@@ -1,32 +1,29 @@
 /**
- * dsh-waifu-agents — a ZIP writer, and nothing else.
+ * dsh-waifu-agents —— 一个 ZIP 写入器，仅此而已。
  *
- * Why this file exists: the panel used to export a batch by firing one download
- * per persona. A batch of twelve therefore opened twelve save dialogs and could
- * scatter the files across twelve different folders — the same gesture, twelve
- * times, with no way to say "all of them, here". One archive is one dialog and
- * one destination; the browser cannot be told a folder, so the folder has to be
- * implied by a single file.
+ * 这个文件为什么存在：面板过去导出批量时给每个人设各发一次下载。一批十二个
+ * 因此会弹出十二个保存对话框，还可能把文件散落到十二个不同文件夹 —— 同一个
+ * 动作重复十二次，还没有办法说"全部都要，放这里"。一个压缩包就是一次对话框、
+ * 一个目的地；浏览器没法被告知文件夹，所以文件夹只能由单个文件来暗示。
  *
- * No dependency is added for this. The manifest declares exactly one runtime
- * dependency (`@deepseek-ai/schemastery`) and the plugin manager will happily
- * install anything that is listed — but a zip is ~110 lines of well-specified
- * byte layout, and `node:zlib` is already there for the compression. Keeping it
- * local also keeps it testable: `buildZip` is a pure function over buffers, so
- * `selftest-v3.mjs` can round-trip it without a host, a browser or a DOM.
+ * 不为此新增任何依赖。manifest 只声明了一个运行时依赖
+ * （`@deepseek-ai/schemastery`），插件管理器会很乐意装下列出的任何东西 ——
+ * 但一个 zip 不过是约 110 行规定明确的字节布局，而 `node:zlib` 本来就在那儿
+ * 管压缩。把它留在本地也让它可测：`buildZip` 是缓冲区上的纯函数，
+ * `selftest-v3.mjs` 不需要宿主、浏览器或 DOM 就能往返验证它。
  *
- * Only the subset a file archive needs is implemented:
- *   - STORE (method 0) and DEFLATE (method 8), chosen per entry by whichever is
- *     smaller — a 300-byte persona is bigger after deflating, a 40 KB one is not
- *   - UTF-8 names (general-purpose flag bit 11), because a persona id may be
- *     Chinese (`后藤一里.md`) and a legacy CP437 reader would mangle it
- *   - no comments, no extra fields, no ZIP64, no encryption, no directories
- * Every limit that follows from that is real: an entry name longer than 65535
- * bytes or an archive over 4 GiB is refused rather than silently truncated.
+ * 只实现了文件归档所需的子集：
+ *   - STORE（方法 0）与 DEFLATE（方法 8），逐条目选更小的那个 —— 300 字节
+ *     的人设压缩后反而更大，40 KB 的则不会
+ *   - UTF-8 文件名（通用标志位 11），因为人设 id 可能是中文（`后藤一里.md`），
+ *     老式 CP437 读取器会把它弄坏
+ *   - 无注释、无附加字段、无 ZIP64、无加密、无目录
+ * 由此带来的每条限制都是真的：条目名超过 65535 字节或压缩包超过 4 GiB 会被
+ * 拒绝，而不是静默截断。
  */
 import zlib from "node:zlib";
 
-/** RFC 1952's CRC-32, the one ZIP uses. Table built once, at load. */
+/** RFC 1952 的 CRC-32，也就是 ZIP 用的那个。表在加载时一次性构建。 */
 const CRC_TABLE = (() => {
   const table = new Uint32Array(256);
   for (let index = 0; index < 256; index += 1) {
@@ -39,7 +36,7 @@ const CRC_TABLE = (() => {
   return table;
 })();
 
-/** CRC of one buffer. `0` for empty input, which is what ZIP stores. */
+/** 一个缓冲区的 CRC。空输入得 `0`，ZIP 存的就是这个值。 */
 export function crc32(buffer) {
   let value = 0xffffffff;
   for (const byte of buffer) {
@@ -48,7 +45,7 @@ export function crc32(buffer) {
   return (value ^ 0xffffffff) >>> 0;
 }
 
-/** MS-DOS packed date/time, local time, clamped to the format's 1980 floor. */
+/** MS-DOS 打包的日期/时间，本地时间，钳制到该格式 1980 年的下限。 */
 function dosStamp(date) {
   const year = Math.min(Math.max(date.getFullYear(), 1980), 2107);
   const time =
@@ -67,12 +64,11 @@ const MAX_UINT32 = 0xffffffff;
 const MAX_UINT16 = 0xffff;
 
 /**
- * Build a ZIP from `[{ name, data }]`.
+ * 从 `[{ name, data }]` 构建一个 ZIP。
  *
- * `data` may be a Buffer or a string (UTF-8). Names are taken as given; the
- * caller decides the folder layout, and a plain flat archive is the point here.
- * `options.date` fixes the timestamp for every entry — tests pass one, the host
- * passes `new Date()`.
+ * `data` 可以是 Buffer 或字符串（UTF-8）。名字按原样采用；目录布局由调用方
+ * 决定，这里要的就是一个纯平铺的压缩包。`options.date` 固定所有条目的时间戳
+ * —— 测试传一个固定值，宿主传 `new Date()`。
  */
 export function buildZip(entries, options = {}) {
   if (!Array.isArray(entries) || entries.length === 0) {
@@ -97,9 +93,9 @@ export function buildZip(entries, options = {}) {
     if (raw.length > MAX_UINT32) throw new Error(`zip: 单个文件超过 4 GiB：${name}`);
 
     /*
-     * Deflate, but only keep it when it actually helped. A one-paragraph persona
-     * grows by a few bytes under deflate, and a store-only entry is also what
-     * makes a corrupt-but-readable archive possible for anything hand-inspected.
+     * 做 deflate，但只有真变小了才保留它。一段话的人设经过 deflate 会涨几个
+     * 字节，而仅 store 的条目也正是让人工检视时能有一个"损坏但可读"压缩包的
+     * 原因。
      */
     const deflated = zlib.deflateRawSync(raw, { level: 9 });
     const useDeflate = deflated.length < raw.length;
@@ -109,7 +105,7 @@ export function buildZip(entries, options = {}) {
 
     const local = Buffer.alloc(30);
     local.writeUInt32LE(SIG_LOCAL, 0);
-    local.writeUInt16LE(20, 4); // version needed
+    local.writeUInt16LE(20, 4); // 所需版本
     local.writeUInt16LE(FLAG_UTF8, 6);
     local.writeUInt16LE(method, 8);
     local.writeUInt16LE(stamp.time, 10);
@@ -118,13 +114,13 @@ export function buildZip(entries, options = {}) {
     local.writeUInt32LE(body.length, 18);
     local.writeUInt32LE(raw.length, 22);
     local.writeUInt16LE(nameBytes.length, 26);
-    local.writeUInt16LE(0, 28); // extra field length
+    local.writeUInt16LE(0, 28); // 附加字段长度
     locals.push(local, nameBytes, body);
 
     const central = Buffer.alloc(46);
     central.writeUInt32LE(SIG_CENTRAL, 0);
-    central.writeUInt16LE(20, 4); // version made by
-    central.writeUInt16LE(20, 6); // version needed
+    central.writeUInt16LE(20, 4); // 生成方版本
+    central.writeUInt16LE(20, 6); // 所需版本
     central.writeUInt16LE(FLAG_UTF8, 8);
     central.writeUInt16LE(method, 10);
     central.writeUInt16LE(stamp.time, 12);
@@ -133,11 +129,11 @@ export function buildZip(entries, options = {}) {
     central.writeUInt32LE(body.length, 20);
     central.writeUInt32LE(raw.length, 24);
     central.writeUInt16LE(nameBytes.length, 28);
-    central.writeUInt16LE(0, 30); // extra
-    central.writeUInt16LE(0, 32); // comment
-    central.writeUInt16LE(0, 34); // disk number
-    central.writeUInt16LE(0, 36); // internal attributes
-    central.writeUInt32LE(0, 38); // external attributes
+    central.writeUInt16LE(0, 30); // 附加字段
+    central.writeUInt16LE(0, 32); // 注释
+    central.writeUInt16LE(0, 34); // 磁盘号
+    central.writeUInt16LE(0, 36); // 内部属性
+    central.writeUInt32LE(0, 38); // 外部属性
     central.writeUInt32LE(offset, 42);
     centrals.push(central, nameBytes);
 
@@ -153,22 +149,21 @@ export function buildZip(entries, options = {}) {
 
   const end = Buffer.alloc(22);
   end.writeUInt32LE(SIG_END, 0);
-  end.writeUInt16LE(0, 4); // this disk
-  end.writeUInt16LE(0, 6); // disk with central directory
+  end.writeUInt16LE(0, 4); // 本磁盘
+  end.writeUInt16LE(0, 6); // 中央目录所在磁盘
   end.writeUInt16LE(entries.length, 8);
   end.writeUInt16LE(entries.length, 10);
   end.writeUInt32LE(centralBuffer.length, 12);
   end.writeUInt32LE(centralOffset, 16);
-  end.writeUInt16LE(0, 20); // archive comment
+  end.writeUInt16LE(0, 20); // 压缩包注释
 
   return Buffer.concat([...locals, centralBuffer, end]);
 }
 
 /**
- * Read back what `buildZip` wrote — used by the self-test only, and deliberately
- * strict: it validates the central directory against the local headers instead
- * of trusting one of them, so a writer bug cannot pass by being consistent with
- * itself.
+ * 读回 `buildZip` 写出的内容 —— 仅自测使用，且有意严格：它用本地头去校验
+ * 中央目录，而不是信任其中任何一个，所以写入器的 bug 无法靠"自己和自己
+ * 一致"蒙混过关。
  */
 export function readZip(buffer) {
   const endAt = buffer.length - 22;

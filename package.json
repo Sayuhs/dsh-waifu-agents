@@ -1,6 +1,6 @@
 {
   "name": "dsh-waifu-agents",
-  "version": "0.2.5",
+  "version": "0.3.0",
   "type": "module",
   "description": "Registers every *.md in a persona directory as an agent preset, and manages them from the Plugins settings page.",
   "license": "MIT",
@@ -12,8 +12,9 @@
     "agent-preset"
   ],
   "scripts": {
-    "test": "node selftest-v3.mjs && node selftest-dual.mjs && node selftest-r5.mjs",
-    "eval": "node eval-v3.mjs"
+    "test": "node scripts/run-suites.mjs",
+    "eval": "node scripts/run-suites.mjs eval",
+    "doctor": "node scripts/doctor.mjs"
   },
   "exports": {
     ".": "./index.js",
@@ -26,16 +27,29 @@
     "client.js",
     "team.js",
     "zip.js",
+    "text.js",
+    "package-meta.js",
+    "self-update.js",
+    "commands.js",
+    "http-route.js",
+    "panel-ops.js",
+    "memory-ops.js",
+    "team-mode.js",
     "team-simulate.js",
     "team-snapshot.js",
     "team-runtime.js",
     "team-memory.js",
+    "persona-memory.js",
+    "tool-filter.js",
+    "seed-assets.js",
     "cordis.patch.yml",
     "template.json",
     "personas/",
     "locale/",
+    "scripts/",
     "icon.png",
-    "docs/",
+    "docs/token-cost-ladder.svg",
+    "docs/token-cache-lines.svg",
     "README.md"
   ],
   "icon": "./icon.png",
