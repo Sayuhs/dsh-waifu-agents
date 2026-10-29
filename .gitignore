@@ -31,6 +31,10 @@ MAINTAINER.md
 selftest-v3.mjs
 selftest-dual.mjs
 selftest-r5.mjs
+selftest-memory.mjs
+selftest-memory-ops.mjs
+selftest-tool-filter.mjs
+selftest-seed.mjs
 eval-v3.mjs
 eval/
 

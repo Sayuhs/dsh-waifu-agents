@@ -1,0 +1,9 @@
+# This tree is developed on Windows with `core.autocrlf=true`, which would
+# hand every checkout CRLF line endings. The README gates compare exact table
+# separators and the suites read files byte for byte, so a CRLF checkout has
+# already turned them red once. Pin LF in the working tree instead.
+* text=auto eol=lf
+
+# Binary assets: never diff, never convert.
+*.png binary
+*.tgz binary
