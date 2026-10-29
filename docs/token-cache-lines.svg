@@ -1,0 +1,111 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 500" width="960" height="500" role="img" aria-label="累计输入 token 的名义值与缓存折算值：单人聊天 7 轮名义 2.4 万、折算 4,535；带工具清单那档每轮全价重发，7 轮 5.5 万；干活 5 轮名义 2,270 万、折算 261 万">
+<rect width="960" height="500" fill="#ffffff"/>
+<text x="26" y="30" font-family="-apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="15" font-weight="600" fill="#1f2328">多轮之后会不会越聊越贵：名义输入 vs 缓存折算</text>
+<text x="26" y="50" font-family="-apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="11.5" fill="#656d76">工具清单只在请求里带，从不出现在回复里；带过一次之后进缓存，按 1/10 计价。图中每轮实线是账面上的输入 token，蓝虚线是扣掉缓存折扣后的实际计费。</text>
+<g stroke="#eef1f5" stroke-width="1">
+<line x1="88" y1="100.0" x2="448" y2="100.0"/>
+<line x1="88" y1="171.5" x2="448" y2="171.5"/>
+<line x1="88" y1="243.0" x2="448" y2="243.0"/>
+<line x1="88" y1="314.5" x2="448" y2="314.5"/>
+<line x1="88" y1="386.0" x2="448" y2="386.0"/>
+</g>
+<line x1="88" y1="386" x2="448" y2="386" stroke="#d0d7de" stroke-width="1"/>
+<text x="88" y="70" font-family="-apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="12.5" font-weight="600" fill="#1f2328">单人聊天：7 轮实测</text>
+<text x="88" y="86" font-family="-apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="10.5" fill="#656d76">两个真实会话，同一个本机、同一个模型</text>
+<g font-family="-apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="10" fill="#656d76" text-anchor="end">
+<text x="80" y="389.5">0</text>
+<text x="80" y="318.0">1.5 万</text>
+<text x="80" y="246.5">3 万</text>
+<text x="80" y="175.0">4.5 万</text>
+<text x="80" y="103.5">6 万</text>
+</g>
+<g font-family="-apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="10" fill="#656d76" text-anchor="middle">
+<text x="88.0" y="402">1</text>
+<text x="148.0" y="402">2</text>
+<text x="208.0" y="402">3</text>
+<text x="268.0" y="402">4</text>
+<text x="328.0" y="402">5</text>
+<text x="388.0" y="402">6</text>
+<text x="448.0" y="402">7</text>
+<text x="268" y="418" fill="#656d76" font-size="10.5">第几轮</text>
+</g>
+<g stroke="#eef1f5" stroke-width="1">
+<line x1="570" y1="100.0" x2="930" y2="100.0"/>
+<line x1="570" y1="171.5" x2="930" y2="171.5"/>
+<line x1="570" y1="243.0" x2="930" y2="243.0"/>
+<line x1="570" y1="314.5" x2="930" y2="314.5"/>
+<line x1="570" y1="386.0" x2="930" y2="386.0"/>
+</g>
+<line x1="570" y1="386" x2="930" y2="386" stroke="#d0d7de" stroke-width="1"/>
+<text x="570" y="70" font-family="-apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="12.5" font-weight="600" fill="#1f2328">带工具干活：5 轮实测</text>
+<text x="570" y="86" font-family="-apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="10.5" fill="#656d76">一场 516 次工具调用的会话</text>
+<g font-family="-apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="10" fill="#656d76" text-anchor="end">
+<text x="562" y="389.5">0</text>
+<text x="562" y="318.0">600 万</text>
+<text x="562" y="246.5">1200 万</text>
+<text x="562" y="175.0">1800 万</text>
+<text x="562" y="103.5">2400 万</text>
+</g>
+<g font-family="-apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="10" fill="#656d76" text-anchor="middle">
+<text x="570.0" y="402">1</text>
+<text x="660.0" y="402">2</text>
+<text x="750.0" y="402">3</text>
+<text x="840.0" y="402">4</text>
+<text x="930.0" y="402">5</text>
+<text x="750" y="418" fill="#656d76" font-size="10.5">第几轮</text>
+</g>
+<path d="M88.0,337.6 L148.0,287.8 L208.0,267.1 L268.0,255.0 L328.0,200.1 L388.0,142.9 L448.0,122.1" fill="none" stroke="#94a3b8" stroke-width="2.2" stroke-linejoin="round"/>
+<circle cx="88.0" cy="337.6" r="2.4" fill="#94a3b8"/>
+<circle cx="148.0" cy="287.8" r="2.4" fill="#94a3b8"/>
+<circle cx="208.0" cy="267.1" r="2.4" fill="#94a3b8"/>
+<circle cx="268.0" cy="255.0" r="2.4" fill="#94a3b8"/>
+<circle cx="328.0" cy="200.1" r="2.4" fill="#94a3b8"/>
+<circle cx="388.0" cy="142.9" r="2.4" fill="#94a3b8"/>
+<circle cx="448.0" cy="122.1" r="2.4" fill="#94a3b8"/>
+<path d="M88.0,373.3 L148.0,358.8 L208.0,343.1 L268.0,325.3 L328.0,307.4 L388.0,289.0 L448.0,269.9" fill="none" stroke="#0d9488" stroke-width="2.4" stroke-linejoin="round"/>
+<path d="M88.0,382.1 L148.0,378.6 L208.0,375.5 L268.0,371.4 L328.0,369.5 L388.0,366.9 L448.0,364.4" fill="none" stroke="#2f6feb" stroke-width="2.2" stroke-dasharray="5 4" stroke-linejoin="round"/>
+<circle cx="88.0" cy="373.3" r="2.8" fill="#0d9488"/>
+<circle cx="88.0" cy="382.1" r="2.2" fill="#2f6feb"/>
+<circle cx="148.0" cy="358.8" r="2.8" fill="#0d9488"/>
+<circle cx="148.0" cy="378.6" r="2.2" fill="#2f6feb"/>
+<circle cx="208.0" cy="343.1" r="2.8" fill="#0d9488"/>
+<circle cx="208.0" cy="375.5" r="2.2" fill="#2f6feb"/>
+<circle cx="268.0" cy="325.3" r="2.8" fill="#0d9488"/>
+<circle cx="268.0" cy="371.4" r="2.2" fill="#2f6feb"/>
+<circle cx="328.0" cy="307.4" r="2.8" fill="#0d9488"/>
+<circle cx="328.0" cy="369.5" r="2.2" fill="#2f6feb"/>
+<circle cx="388.0" cy="289.0" r="2.8" fill="#0d9488"/>
+<circle cx="388.0" cy="366.9" r="2.2" fill="#2f6feb"/>
+<circle cx="448.0" cy="269.9" r="2.8" fill="#0d9488"/>
+<circle cx="448.0" cy="364.4" r="2.2" fill="#2f6feb"/>
+<text x="442" y="112.1078" font-family="-apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="10.5" fill="#94a3b8" text-anchor="end" paint-order="stroke" stroke="#ffffff" stroke-width="3.2" stroke-linejoin="round">清单在 5.5 万，全价</text>
+<text x="450" y="255.93643333333335" font-family="-apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="10.5" fill="#0d9488" text-anchor="end" paint-order="stroke" stroke="#ffffff" stroke-width="3.2" stroke-linejoin="round">工具收走 2.4 万</text>
+<text x="450" y="354.3831666666667" font-family="-apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="10.5" font-weight="600" fill="#2f6feb" text-anchor="end" paint-order="stroke" stroke="#ffffff" stroke-width="3.2" stroke-linejoin="round">折算 4,535</text>
+<path d="M570.0,364.8 L660.0,356.6 L750.0,334.2 L840.0,298.2 L930.0,115.5" fill="none" stroke="#b45309" stroke-width="2.8" stroke-linejoin="round"/>
+<path d="M570.0,383.1 L660.0,382.2 L750.0,379.7 L840.0,375.8 L930.0,354.9" fill="none" stroke="#2f6feb" stroke-width="2.4" stroke-dasharray="5 4" stroke-linejoin="round"/>
+<circle cx="570.0" cy="364.8" r="3.2" fill="#b45309"/>
+<circle cx="570.0" cy="383.1" r="2.6" fill="#2f6feb"/>
+<circle cx="660.0" cy="356.6" r="3.2" fill="#b45309"/>
+<circle cx="660.0" cy="382.2" r="2.6" fill="#2f6feb"/>
+<circle cx="750.0" cy="334.2" r="3.2" fill="#b45309"/>
+<circle cx="750.0" cy="379.7" r="2.6" fill="#2f6feb"/>
+<circle cx="840.0" cy="298.2" r="3.2" fill="#b45309"/>
+<circle cx="840.0" cy="375.8" r="2.6" fill="#2f6feb"/>
+<circle cx="930.0" cy="115.5" r="3.2" fill="#b45309"/>
+<circle cx="930.0" cy="354.9" r="2.6" fill="#2f6feb"/>
+<text x="920" y="103.50019900000001" font-family="-apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="11" font-weight="600" fill="#b45309" text-anchor="end" paint-order="stroke" stroke="#ffffff" stroke-width="3.2" stroke-linejoin="round">名义 2,270 万</text>
+<text x="920" y="342.90691416666664" font-family="-apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="11" font-weight="600" fill="#2f6feb" text-anchor="end" paint-order="stroke" stroke="#ffffff" stroke-width="3.2" stroke-linejoin="round">折算 261 万</text>
+<text x="574" y="114.30000000000001" font-family="-apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="10" fill="#656d76" paint-order="stroke" stroke="#ffffff" stroke-width="3.2" stroke-linejoin="round">第 1 轮就 178 万，98% 是重复上下文</text>
+<text x="574" y="128.3" font-family="-apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="10" fill="#656d76" paint-order="stroke" stroke="#ffffff" stroke-width="3.2" stroke-linejoin="round">会话越长，两条线的口子撕得越大</text>
+<g font-family="-apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="11" fill="#1f2328">
+<rect x="90" y="424" width="12" height="3" fill="#94a3b8"/><text x="108" y="428">清单在、每轮全价</text>
+<rect x="248" y="424" width="12" height="3" fill="#0d9488"/><text x="266" y="428">工具收走、命中缓存</text>
+<rect x="404" y="424" width="12" height="3" fill="#b45309"/><text x="422" y="428">带工具干活</text>
+<line x1="520" y1="426" x2="546" y2="426" stroke="#2f6feb" stroke-width="2.2" stroke-dasharray="5 4"/><text x="554" y="428" fill="#2f6feb">缓存折算后</text>
+</g>
+<g font-family="-apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="10.5" fill="#656d76">
+<text x="26" y="452">① 名义＝inputTokens＋cacheReadTokens；折算＝inputTokens＋cacheReadTokens×0.1（缓存读 1/10 价，与 Anthropic / DeepSeek 同口径）。只算输入，输出另计。</text>
+<text x="26" y="468">② 左灰线 7 轮里 6 轮 cacheRead＝0：前缀没命中，等于每轮把 1 万人设＋清单重发一遍；摘掉工具后第 2 轮起命中 90%。贵不贵看前缀稳不稳，不看聊了几轮。</text>
+<text x="26" y="484">③ 右图 98.3% 的输入是缓存读；另一场 40 轮会话同理（98.2%，名义 3.6 亿 / 折算 4,193 万）。会话越长，名义涨得越陡，折算几乎贴着地走。</text>
+</g>
+</svg>

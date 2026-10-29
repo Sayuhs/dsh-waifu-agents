@@ -1,0 +1,92 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 500" width="960" height="500" role="img" aria-label="一轮输入 token 的量级对比：团队讨论、单人聊天、裸聊都在几千；闸门前单人聊天背了约 7 千 token 的清单；真开始调工具就跳到百万级">
+<rect width="960" height="500" fill="#ffffff"/>
+<text x="26" y="30" font-family="-apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="15" font-weight="600" fill="#1f2328">一轮对话要花多少输入 token：纯聊天也分两档，干活跳三个数量级</text>
+<text x="26" y="50" font-family="-apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="11.5" fill="#656d76">插件聊天 3,736、团队讨论 3,094，而不用插件的默认模式是 6,361——它自带一份工具清单，纯聊天也照付。横轴对数，每格 ×10。</text>
+<g stroke="#e5e9ef" stroke-width="1">
+<line x1="232.0" y1="72" x2="232.0" y2="380"/>
+<line x1="338.7" y1="72" x2="338.7" y2="380"/>
+<line x1="445.3" y1="72" x2="445.3" y2="380"/>
+<line x1="552.0" y1="72" x2="552.0" y2="380"/>
+<line x1="658.7" y1="72" x2="658.7" y2="380"/>
+<line x1="765.3" y1="72" x2="765.3" y2="380"/>
+<line x1="872.0" y1="72" x2="872.0" y2="380"/>
+</g>
+<g font-family="-apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="10" fill="#656d76" text-anchor="middle">
+<text x="232.0" y="396">1 千</text>
+<text x="338.7" y="396">1 万</text>
+<text x="445.3" y="396">10 万</text>
+<text x="552.0" y="396">100 万</text>
+<text x="658.7" y="396">1,000 万</text>
+<text x="765.3" y="396">1 亿</text>
+<text x="872.0" y="396">10 亿</text>
+</g>
+<line x1="232" y1="380" x2="872" y2="380" stroke="#d0d7de" stroke-width="1"/>
+<line x1="232" y1="100" x2="293.1" y2="100" stroke="#0d9488" stroke-width="1" opacity="0.2"/>
+<line x1="277.4" y1="100" x2="296.1" y2="100" stroke="#0d9488" stroke-width="1.4" opacity="0.5"/>
+<line x1="277.4" y1="95" x2="277.4" y2="105" stroke="#0d9488" stroke-width="1.4" opacity="0.5"/>
+<line x1="296.1" y1="95" x2="296.1" y2="105" stroke="#0d9488" stroke-width="1.4" opacity="0.5"/>
+<circle cx="293.1" cy="100" r="6.5" fill="#0d9488" stroke="#ffffff" stroke-width="2"/>
+<text x="220" y="104" font-family="-apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="12" fill="#1f2328" text-anchor="end">单人聊天（插件闸门）</text>
+<text x="220" y="117" font-family="-apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="9.5" fill="#656d76" text-anchor="end">工具被整个收走</text>
+<text x="304.1" y="104" font-family="-apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="11.5" font-weight="600" fill="#0d9488" paint-order="stroke" stroke="#ffffff" stroke-width="3.2" stroke-linejoin="round">3,736</text>
+<line x1="232" y1="140" x2="284.3" y2="140" stroke="#0d9488" stroke-width="1" opacity="0.2"/>
+<line x1="274.3" y1="140" x2="300.2" y2="140" stroke="#0d9488" stroke-width="1.4" opacity="0.5"/>
+<line x1="274.3" y1="135" x2="274.3" y2="145" stroke="#0d9488" stroke-width="1.4" opacity="0.5"/>
+<line x1="300.2" y1="135" x2="300.2" y2="145" stroke="#0d9488" stroke-width="1.4" opacity="0.5"/>
+<circle cx="284.3" cy="140" r="6.5" fill="#0d9488" stroke="#ffffff" stroke-width="2"/>
+<text x="220" y="144" font-family="-apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="12" fill="#1f2328" text-anchor="end">团队讨论</text>
+<text x="220" y="157" font-family="-apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="9.5" fill="#656d76" text-anchor="end">请求里没有 tools 字段</text>
+<text x="295.3" y="144" font-family="-apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="11.5" font-weight="600" fill="#0d9488" paint-order="stroke" stroke="#ffffff" stroke-width="3.2" stroke-linejoin="round">3,094</text>
+<line x1="232" y1="188" x2="317.7" y2="188" stroke="#94a3b8" stroke-width="1" opacity="0.2"/>
+<line x1="316.4" y1="188" x2="318.9" y2="188" stroke="#94a3b8" stroke-width="1.4" opacity="0.5"/>
+<line x1="316.4" y1="183" x2="316.4" y2="193" stroke="#94a3b8" stroke-width="1.4" opacity="0.5"/>
+<line x1="318.9" y1="183" x2="318.9" y2="193" stroke="#94a3b8" stroke-width="1.4" opacity="0.5"/>
+<circle cx="317.7" cy="188" r="6.5" fill="#94a3b8" stroke="#ffffff" stroke-width="2"/>
+<text x="220" y="192" font-family="-apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="12" fill="#1f2328" text-anchor="end">不用插件·默认模式</text>
+<text x="220" y="205" font-family="-apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="9.5" fill="#656d76" text-anchor="end">清单照付，0 次调用</text>
+<text x="328.7" y="192" font-family="-apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="11.5" font-weight="600" fill="#94a3b8" paint-order="stroke" stroke="#ffffff" stroke-width="3.2" stroke-linejoin="round">6,361</text>
+<line x1="232" y1="228" x2="339.4" y2="228" stroke="#94a3b8" stroke-width="1" opacity="0.2"/>
+<circle cx="339.4" cy="228" r="6" fill="#ffffff" stroke="#94a3b8" stroke-width="2"/>
+<text x="220" y="232" font-family="-apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="12" fill="#1f2328" text-anchor="end">单人聊天（闸门前）</text>
+<text x="220" y="245" font-family="-apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="9.5" fill="#656d76" text-anchor="end">人设 + 清单，0 次调用</text>
+<text x="350.4" y="232" font-family="-apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="11.5" font-weight="600" fill="#94a3b8" paint-order="stroke" stroke="#ffffff" stroke-width="3.2" stroke-linejoin="round">10,157</text>
+<line x1="232" y1="278" x2="581.3" y2="278" stroke="#b45309" stroke-width="1" opacity="0.2"/>
+<line x1="534.6" y1="278" x2="678.5" y2="278" stroke="#b45309" stroke-width="1.4" opacity="0.5"/>
+<line x1="534.6" y1="273" x2="534.6" y2="283" stroke="#b45309" stroke-width="1.4" opacity="0.5"/>
+<line x1="678.5" y1="273" x2="678.5" y2="283" stroke="#b45309" stroke-width="1.4" opacity="0.5"/>
+<circle cx="581.3" cy="278" r="6.5" fill="#b45309" stroke="#ffffff" stroke-width="2"/>
+<text x="220" y="282" font-family="-apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="12" fill="#1f2328" text-anchor="end">单人干活</text>
+<text x="220" y="295" font-family="-apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="9.5" fill="#656d76" text-anchor="end">人设 + 全套工具</text>
+<text x="592.3" y="282" font-family="-apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="11.5" font-weight="600" fill="#b45309" paint-order="stroke" stroke="#ffffff" stroke-width="3.2" stroke-linejoin="round">188 万</text>
+<line x1="232" y1="316" x2="600.0" y2="316" stroke="#b45309" stroke-width="1" opacity="0.2"/>
+<line x1="403.2" y1="316" x2="723.6" y2="316" stroke="#b45309" stroke-width="1.4" opacity="0.5"/>
+<line x1="403.2" y1="311" x2="403.2" y2="321" stroke="#b45309" stroke-width="1.4" opacity="0.5"/>
+<line x1="723.6" y1="311" x2="723.6" y2="321" stroke="#b45309" stroke-width="1.4" opacity="0.5"/>
+<circle cx="600.0" cy="316" r="6.5" fill="#b45309" stroke="#ffffff" stroke-width="2"/>
+<text x="220" y="320" font-family="-apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="12" fill="#1f2328" text-anchor="end">团队预设干活</text>
+<text x="220" y="333" font-family="-apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="9.5" fill="#656d76" text-anchor="end">不是团队，见注 ④</text>
+<text x="611.0" y="320" font-family="-apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="11.5" font-weight="600" fill="#b45309" paint-order="stroke" stroke="#ffffff" stroke-width="3.2" stroke-linejoin="round">282 万</text>
+<line x1="232" y1="354" x2="640.5" y2="354" stroke="#b45309" stroke-width="1" opacity="0.2"/>
+<line x1="436.7" y1="354" x2="774.8" y2="354" stroke="#b45309" stroke-width="1.4" opacity="0.5"/>
+<line x1="436.7" y1="349" x2="436.7" y2="359" stroke="#b45309" stroke-width="1.4" opacity="0.5"/>
+<line x1="774.8" y1="349" x2="774.8" y2="359" stroke="#b45309" stroke-width="1.4" opacity="0.5"/>
+<circle cx="640.5" cy="354" r="6.5" fill="#b45309" stroke="#ffffff" stroke-width="2"/>
+<text x="220" y="358" font-family="-apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="12" fill="#1f2328" text-anchor="end">单人无插件干活</text>
+<text x="220" y="371" font-family="-apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="9.5" fill="#656d76" text-anchor="end">裸平台 + 全套工具</text>
+<text x="651.5" y="358" font-family="-apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="11.5" font-weight="600" fill="#b45309" paint-order="stroke" stroke="#ffffff" stroke-width="3.2" stroke-linejoin="round">676 万</text>
+<line x1="232" y1="251" x2="872" y2="251" stroke="#d0d7de" stroke-width="1" stroke-dasharray="4 5"/>
+<text x="872" y="267" font-family="-apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="10.5" fill="#b45309" text-anchor="end">↑ 开始调工具，跳到百万级 —— 差近 3 个数量级</text>
+<g font-family="-apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="10.5" fill="#656d76">
+<circle cx="31" cy="410" r="5.5" fill="#0d9488"/><text x="44" y="414">零工具（请求里无 tools）</text>
+<circle cx="200" cy="410" r="5.5" fill="#94a3b8"/><text x="213" y="414">清单在、0 次调用</text>
+<circle cx="340" cy="410" r="5.5" fill="#b45309"/><text x="353" y="414">带工具真干活</text>
+<g stroke="#656d76" stroke-width="1.4" opacity="0.6"><line x1="440" y1="410" x2="470" y2="410"/><line x1="440" y1="406" x2="440" y2="414"/><line x1="470" y1="406" x2="470" y2="414"/></g>
+<text x="478" y="414">实测最小–最大</text>
+</g>
+<g font-family="-apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="10.5" fill="#656d76">
+<text x="26" y="436">① 只算输入（inputTokens + cacheReadTokens），不含输出。样本：插件单人聊天 7 轮、团队讨论 7 轮、默认模式 4 轮（均单轮）、单人干活 5 轮、团队预设 63 轮、裸平台干活 131 轮。</text>
+<text x="26" y="452">② 干活侧波动极大：裸平台 8 万–1.23 亿（那场仍在增长）、团队预设 4 万–4,062 万、单人干活 69 万–1,533 万；任务不同，只比量级。</text>
+<text x="26" y="468">③ 「不用插件」≠「不背工具」：默认模式自带 25–28 个工具、约 5,200–5,500 token，一句闲聊也照付，所以比插件聊天贵近一倍。</text>
+<text x="26" y="484">④ 空心点＝闸门前单人首轮 10,157（含 6,957 清单）；「团队预设干活」不是团队：挂着预设却从未触发讨论，实为单人 agent 干活。</text>
+</g>
+</svg>
