@@ -14,7 +14,7 @@
  *   2. 有文件时按固定顺序逐个跑，第一个失败就停——与 shell 的 `&&` 同语义。
  *
  * 用法：
- *   node scripts/run-suites.mjs          # 六个 selftest
+ *   node scripts/run-suites.mjs          # 八个 selftest
  *   node scripts/run-suites.mjs eval     # 打分用的 harness（需要 eval/ 里的参考稿）
  */
 import fs from "node:fs";
@@ -31,6 +31,7 @@ const SUITES = [
   "selftest-r5.mjs",
   "selftest-memory.mjs",
   "selftest-memory-ops.mjs",
+  "selftest-concurrency.mjs",
   "selftest-tool-filter.mjs",
   "selftest-seed.mjs",
 ];

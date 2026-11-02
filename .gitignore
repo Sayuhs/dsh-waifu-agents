@@ -33,6 +33,7 @@ selftest-dual.mjs
 selftest-r5.mjs
 selftest-memory.mjs
 selftest-memory-ops.mjs
+selftest-concurrency.mjs
 selftest-tool-filter.mjs
 selftest-seed.mjs
 eval-v3.mjs

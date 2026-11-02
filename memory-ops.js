@@ -28,14 +28,16 @@ export function installMemoryOps(ctx, deps) {
     MAX_MAX_ENTRIES,
     MIN_MAX_ENTRIES,
     PACKAGE_NAME,
+    SNAPSHOT_LOCK,
     clampEntryText,
     clampMaxEntries,
-    clearStore,
     dir,
     effectiveEnabled,
+    forgetStore,
     homeFromEnv,
     listStoredIds,
     matchPersona,
+    mutateStore,
     oneLine,
     personaConfigOf,
     readConfig,
@@ -43,9 +45,9 @@ export function installMemoryOps(ctx, deps) {
     recallEntries,
     recentEntries,
     renderMemoryBlock,
+    runExclusive,
     trimToLimit,
     updateConfig,
-    writeStore,
     anchorOf,
     expectsPersona,
     fileCache,
@@ -85,6 +87,38 @@ export function installMemoryOps(ctx, deps) {
 
   /* --------------------------------------------- 人设长期记忆 op */
 
+  /** 认不出更高版本的记忆文件时，面板与日志共用的一句话。 */
+  function unsupportedText(version) {
+    const tag = Number.isInteger(version) && version > 0 ? `（v${version}）` : "";
+    return `这个记忆文件是更新版本的插件写的${tag}，当前版本不会读也不会改它。升级插件后再试。`;
+  }
+
+  /**
+   * 把一次锁内读-改-写的结果翻成面板要的形状。
+   *
+   * 三个失败原因是结构性而非偶发的，所以每种一句话：文件是更高版本写的、
+   * 这一条记忆刚被清空、以及其余（不该发生，但绝不能让面板读到 undefined）。
+   * @param {string} id
+   * @param {{ok: boolean, reason?: string, version?: number, store?: object, result?: any}} outcome
+   */
+  async function settleStoreOutcome(id, outcome) {
+    if (outcome.ok === false) {
+      if (outcome.reason === "unsupported") {
+        return { ok: false, error: unsupportedText(outcome.version) };
+      }
+      if (outcome.reason === "cleared") {
+        return {
+          ok: false,
+          error: "这个角色的记忆刚刚被清空，这次改动没有写入。",
+        };
+      }
+      if (outcome.reason === "no-id") return { ok: false, error: "缺少角色 id。" };
+      return { ok: false, error: "这次改动没有写入。" };
+    }
+    await noteStoreInSnapshot(id, outcome.store);
+    return outcome.result ?? { ok: true };
+  }
+
   /**
    * 面板绘制记忆区块需要的一切——只读。
    *
@@ -108,6 +142,11 @@ export function installMemoryOps(ctx, deps) {
         maxEntries: own.maxEntries,
         count: store.entries.length,
         broken: store.broken === true,
+        /*
+         * 文件是更高版本的插件写的：当前版本不读也不写它。面板拿这个字段
+         * 说明为什么这一行"点了没反应"——静默是最差的一种回答。
+         */
+        unsupported: store.unsupported ?? 0,
         updatedAt: last === undefined ? null : last.at,
       });
     }
@@ -163,12 +202,22 @@ export function installMemoryOps(ctx, deps) {
     const config = await updateConfig(personaMemoryDir, patch);
     let trimmed = null;
     if (persona !== "" && patch.maxEntries !== undefined) {
-      const store = await readStore(personaMemoryDir, persona);
-      const result = trimToLimit(store, clampMaxEntries(patch.maxEntries));
-      if (result.dropped > 0) await writeStore(personaMemoryDir, result.store);
-      trimmed = { dropped: result.dropped, overflow: result.overflow };
+      /*
+       * 裁剪也是读-改-写，必须在人设的锁里做：面板调低上限的同时，一个回合
+       * 正好写完，两边各拿一份 store，谁后写谁把对方的结论吞掉。
+       */
+      const outcome = await mutateStore(personaMemoryDir, persona, (store) => {
+        const result = trimToLimit(store, clampMaxEntries(patch.maxEntries));
+        trimmed = { dropped: result.dropped, overflow: result.overflow };
+        if (result.dropped === 0) return { write: false };
+        return { store: result.store };
+      });
+      if (outcome.reason === "unsupported") {
+        trimmed = { dropped: 0, overflow: 0, unsupported: outcome.version };
+      }
+      await noteStoreInSnapshot(persona, outcome.store);
     }
-    await refreshMemorySnapshot();
+    await noteSnapshotConfig(config);
     return {
       ok: true,
       globalEnabled: config.enabled !== false,
@@ -186,6 +235,8 @@ export function installMemoryOps(ctx, deps) {
     const id = oneLine(request.id);
     if (id === "") return { ok: false, error: "缺少角色 id。" };
     const store = await readStore(personaMemoryDir, id);
+    if (store.unsupported > 0)
+      return { ok: false, error: unsupportedText(store.unsupported), unsupported: store.unsupported };
     return {
       ok: true,
       id,
@@ -207,28 +258,36 @@ export function installMemoryOps(ctx, deps) {
     const entryId = oneLine(request.entryId);
     if (id === "" || entryId === "")
       return { ok: false, error: "缺少角色 id 或记忆 id。" };
-    const store = await readStore(personaMemoryDir, id);
-    if (store.broken === true)
-      return { ok: false, error: "这个角色的记忆文件已损坏，请先清空再编辑。" };
-    const index = store.entries.findIndex((one) => one.id === entryId);
-    if (index < 0) return { ok: false, error: "找不到这条记忆。" };
-    const next = { ...store.entries[index] };
-    if (request.text !== undefined) {
-      const text = clampEntryText(request.text);
-      if (text === "") return { ok: false, error: "记忆内容不能为空。" };
-      next.text = text;
-    }
-    if (request.kind !== undefined)
-      next.kind = request.kind === "stable" ? "stable" : "episode";
-    if (typeof request.pinned === "boolean") next.pinned = request.pinned;
-    if (
-      store.entries.some((one) => one.id !== entryId && one.text === next.text)
-    )
-      return { ok: false, error: "另一条记忆已经是这个内容。" };
-    store.entries[index] = next;
-    await writeStore(personaMemoryDir, store);
-    await refreshMemorySnapshot();
-    return { ok: true, entry: next };
+    const outcome = await mutateStore(personaMemoryDir, id, (store) => {
+      if (store.broken === true)
+        return {
+          write: false,
+          result: { ok: false, error: "这个角色的记忆文件已损坏，请先清空再编辑。" },
+        };
+      const index = store.entries.findIndex((one) => one.id === entryId);
+      if (index < 0)
+        return { write: false, result: { ok: false, error: "找不到这条记忆。" } };
+      const next = { ...store.entries[index] };
+      if (request.text !== undefined) {
+        const text = clampEntryText(request.text);
+        if (text === "")
+          return { write: false, result: { ok: false, error: "记忆内容不能为空。" } };
+        next.text = text;
+      }
+      if (request.kind !== undefined)
+        next.kind = request.kind === "stable" ? "stable" : "episode";
+      if (typeof request.pinned === "boolean") next.pinned = request.pinned;
+      if (
+        store.entries.some((one) => one.id !== entryId && one.text === next.text)
+      )
+        return {
+          write: false,
+          result: { ok: false, error: "另一条记忆已经是这个内容。" },
+        };
+      store.entries[index] = next;
+      return { store, result: { ok: true, entry: next } };
+    });
+    return settleStoreOutcome(id, outcome);
   }
 
   /** 删除一条记忆。必须显式按 id 指定：没有「删最旧的」这种捷径。 */
@@ -238,16 +297,20 @@ export function installMemoryOps(ctx, deps) {
     const entryId = oneLine(request.entryId);
     if (id === "" || entryId === "")
       return { ok: false, error: "缺少角色 id 或记忆 id。" };
-    const store = await readStore(personaMemoryDir, id);
-    if (store.broken === true)
-      return { ok: false, error: "这个角色的记忆文件已损坏，请先清空。" };
-    const before = store.entries.length;
-    store.entries = store.entries.filter((one) => one.id !== entryId);
-    if (store.entries.length === before)
-      return { ok: false, error: "找不到这条记忆。" };
-    await writeStore(personaMemoryDir, store);
-    await refreshMemorySnapshot();
-    return { ok: true, removed: before - store.entries.length };
+    const outcome = await mutateStore(personaMemoryDir, id, (store) => {
+      if (store.broken === true)
+        return {
+          write: false,
+          result: { ok: false, error: "这个角色的记忆文件已损坏，请先清空。" },
+        };
+      const before = store.entries.length;
+      const kept = store.entries.filter((one) => one.id !== entryId);
+      if (kept.length === before)
+        return { write: false, result: { ok: false, error: "找不到这条记忆。" } };
+      store.entries = kept;
+      return { store, result: { ok: true, removed: before - kept.length } };
+    });
+    return settleStoreOutcome(id, outcome);
   }
 
   /**
@@ -258,9 +321,11 @@ export function installMemoryOps(ctx, deps) {
     if (!writable) return readOnly();
     const id = oneLine(request.id);
     if (id === "") return { ok: false, error: "缺少角色 id。" };
-    const cleared = await clearStore(personaMemoryDir, id);
-    await refreshMemorySnapshot();
-    return { ok: true, id, cleared };
+    const outcome = await forgetStore(personaMemoryDir, id);
+    if (outcome.cleared === false && outcome.reason === "unsupported")
+      return { ok: false, error: unsupportedText(outcome.version) };
+    await noteStoreInSnapshot(id, null);
+    return { ok: true, id, cleared: outcome.cleared === true };
   }
 
   /**
@@ -735,22 +800,60 @@ export function installMemoryOps(ctx, deps) {
    *
    * id 同时来自花名册与磁盘：若迁移没能执行，人设已被改名走的记忆文件
    * 仍然是她的，拒绝加载等于在第一次损失之上再添第二次无声损失。
+   *
+   * 整段在快照锁里跑。这不是为了让读取变慢，而是为了让「刷新」与「写完之后
+   * 把新仓储塞进快照」有一个确定的先后：没有它，一次刷新可能拿一份**比刚写
+   * 进去的更新更旧**的读结果覆盖快照，于是新记忆要等到下一次刷新（也许永远
+   * 不会来）才会被注入。
    */
   async function refreshMemorySnapshot() {
-    const snapshot = await readConfig(personaMemoryDir);
-    const stores = new Map();
-    const ids = new Set(listFiles().map((row) => row.id));
-    for (const id of await listStoredIds(personaMemoryDir)) ids.add(id);
-    for (const id of ids) {
-      try {
-        const store = await readStore(personaMemoryDir, id);
-        if (store.entries.length > 0) stores.set(id, store);
-      } catch {
-        /* 一个读不出的文件不能搭上其他每个人设的记忆。 */
+    return runExclusive(SNAPSHOT_LOCK, async () => {
+      const snapshot = await readConfig(personaMemoryDir);
+      const stores = new Map();
+      const ids = new Set(listFiles().map((row) => row.id));
+      for (const id of await listStoredIds(personaMemoryDir)) ids.add(id);
+      for (const id of ids) {
+        try {
+          const store = await readStore(personaMemoryDir, id);
+          if (store.entries.length > 0) stores.set(id, store);
+        } catch {
+          /* 一个读不出的文件不能搭上其他每个人设的记忆。 */
+        }
       }
-    }
-    memorySnap = { config: snapshot, stores };
-    return memorySnap;
+      memorySnap = { config: snapshot, stores };
+      return memorySnap;
+    });
+  }
+
+  /**
+   * 把刚写完（或刚清空）的那一份塞进快照。
+   *
+   * 走同一把快照锁，而且是**排进队列**而不是当场改：刷新在锁里整份重读然后
+   * 赋值，一次落在刷新中间的同步写会写进那个即将被换掉的旧对象，于是刚存的
+   * 记忆要等到下一次刷新（也许永远不会来）才会被注入。排进队列则保证它一定
+   * 作用在刷新**之后**的那一份上。
+   *
+   * 快照不存在时什么也不做 —— 它只是注入缓存，没有它下一轮会去读磁盘。
+   * @param {string} id
+   * @param {object|null} store 传 null 表示这个人设现在没有记忆
+   */
+  async function noteStoreInSnapshot(id, store) {
+    if (id === "") return;
+    return runExclusive(SNAPSHOT_LOCK, () => {
+      if (memorySnap === null) return;
+      if (store === null || store === undefined || store.entries.length === 0) {
+        memorySnap.stores.delete(id);
+        return;
+      }
+      memorySnap.stores.set(id, store);
+    });
+  }
+
+  /** 改过配置之后让快照里的那一份跟着走，而不是把所有人设重读一遍。 */
+  async function noteSnapshotConfig(config) {
+    return runExclusive(SNAPSHOT_LOCK, () => {
+      if (memorySnap !== null) memorySnap.config = config;
+    });
   }
 
   /**
@@ -976,6 +1079,7 @@ export function installMemoryOps(ctx, deps) {
       currentPersonaIdOf,
       lastUserText,
       memorySnap,
+      noteStoreInSnapshot,
       personaMemoryForTeam,
       refreshMemorySnapshot,
       soloMemoryBlock,

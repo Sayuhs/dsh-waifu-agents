@@ -1,6 +1,6 @@
 {
   "name": "dsh-waifu-agents",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "type": "module",
   "description": "Registers every *.md in a persona directory as an agent preset, and manages them from the Plugins settings page.",
   "license": "MIT",
@@ -40,6 +40,7 @@
     "team-runtime.js",
     "team-memory.js",
     "persona-memory.js",
+    "serialize.js",
     "tool-filter.js",
     "seed-assets.js",
     "cordis.patch.yml",

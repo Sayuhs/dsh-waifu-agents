@@ -18,6 +18,44 @@
 import fs from "node:fs";
 import path from "node:path";
 
+/*
+ * registry 实例的身份证。
+ *
+ * 为什么它不是 `instToken`：那两个问题不一样。`instToken` 回答「这一行账本
+ * 是谁写的」——宿主每 apply 一次就换一个，`scanOnce` 靠它决定接管；而这里要
+ * 回答的是「此刻这个 id 上的注册，是不是登记在**我现在说话的这个注册表**里」。
+ * 两个插件实例可以共享同一个 registry 对象（正常重载），也可以各自拿着不同的
+ * 一个（宿主的注册表自己被重建），这两种情形下 `instToken` 都不同，但答案
+ * 必须不同。
+ *
+ * 令牌按**对象身份**发放：同一个 registry 对象永远拿到同一个令牌，换一个对象
+ * 就换一个令牌。`WeakMap` 保证 registry 被回收之后令牌跟着消失，不会把死掉的
+ * 注册表钉在内存里。
+ *
+ * 它证明不了的事也要写清楚：令牌只说明「读的是不是同一个对象」，不说明那次
+ * 读取发生在什么时刻，也不说明那个对象里有没有别人的注册。所以它只在
+ * `presenceOf()` 里当**前置条件**用，不能单独当证据。
+ *
+ * @type {WeakMap<object, {serial: number}>}
+ */
+const REGISTRY_TOKENS = new WeakMap();
+let registrySerial = 0;
+
+/**
+ * @param {unknown} registry
+ * @returns {{serial: number} | null} 不是对象就没有身份可言
+ */
+function registryTokenOf(registry) {
+  if (registry === null || registry === undefined) return null;
+  if (typeof registry !== "object" && typeof registry !== "function") return null;
+  const known = REGISTRY_TOKENS.get(registry);
+  if (known !== undefined) return known;
+  registrySerial += 1;
+  const token = { serial: registrySerial };
+  REGISTRY_TOKENS.set(registry, token);
+  return token;
+}
+
 /**
  * @param {object} ctx 插件自身的 context
  * @param {object} deps 模块常量、闭包句柄与活动绑定的 thunk
@@ -42,6 +80,7 @@ export function installPanelOps(ctx, deps) {
     normalizeOrder,
     oneLine,
     parseFrontMatter,
+    presetPlacement,
     registrationRev,
     renderPersona,
     reserved,
@@ -124,6 +163,106 @@ export function installPanelOps(ctx, deps) {
    */
   const teamToken = {};
 
+  /*
+   * 本实例说话的那个 registry，以及它的身份证。
+   *
+   * 第一次用到时解析，之后一直用**同一个对象**：注册走它，复核也走它。中途
+   * 如果 `ctx.agentPresets` 换了对象（宿主重建了注册表），那不是我们能替它
+   * 回答的问题——`registryToken` 保持指向我们登记时的那一个，复核时身份对不上
+   * 就一律回 `unreadable`。
+   *
+   * 解析时连续读两次，是为了验证服务面给得出稳定身份。这里有个真宿主
+   * （2026-11-01 诊断落盘实锤）教会我们的坑：cordis 对带 tracker 的服务，
+   * 每次属性访问都现包一层 traceable 代理（`createTraceable`）——裸比对象
+   * 身份，两次**永远**不相等，令牌会被永久置空，此后所有「确认摘除」都是
+   * `unreadable`，改一个人设就弹一次「注销失败」。所以身份比的是解包后的
+   * 底层服务对象（cordis 在代理上留了官方开瓶器，见 {@link registryIdentity}）；
+   * 底层两次都同一个，才发令牌。宁可全部看不清，也不要拿一个每次访问都
+   * 换底的引用去当证据。
+   */
+  let registryRef = null;
+  let registryToken = null;
+
+  /**
+   * 解到 cordis traceable 包装下的底层服务对象。
+   *
+   * cordis 的 traceable 代理专门留了这个读口：读
+   * `Symbol.for("cordis.original")` 返回代理目标（真正的服务对象）；不是
+   * 包装就是普通对象，符号读出来是 `undefined`，原样返回。用全局注册表
+   * 符号而不是 import，是为了不对宿主的模块布局做硬依赖。
+   *
+   * @param {object} value 属性访问刚拿到的（可能是包装的）服务对象
+   * @returns {object} 底层服务对象
+   */
+  function registryIdentity(value) {
+    const inner = value[Symbol.for("cordis.original")];
+    return inner === undefined || inner === null ? value : inner;
+  }
+
+  /**
+   * @returns {object | null} 本实例登记用的 registry（可能还没就绪）
+   */
+  function registryNow() {
+    if (registryRef !== null) return registryRef;
+    const first = ctx.agentPresets;
+    if (first === undefined || first === null) return null;
+    const second = ctx.agentPresets;
+    const identity = registryIdentity(first);
+    registryRef = first;
+    registryToken = identity === registryIdentity(second) ? registryTokenOf(identity) : null;
+    return registryRef;
+  }
+
+  /**
+   * 平台用稳定的 `code` 报「没有这个预设」。判别只认 code：官方注释写明
+   * 「Discrimination is always by `code`, never by instanceof」，而跨 realm
+   * 的 `instanceof` 本来就不可靠。
+   *
+   * @param {unknown} error
+   * @returns {boolean}
+   */
+  function isPresetNotFound(error) {
+    if (error === null || typeof error !== "object") return false;
+    return error.code === "agent-preset/not-found";
+  }
+
+  /**
+   * 这个 id 此刻在注册表里吗——**只回答这一件事**。
+   *
+   * 三种结果，因为宿主能给我们的就是三种：
+   *
+   *  - `absent`      registry 明确回了 `agent-preset/not-found`。这是「摘除」
+   *                  唯一的证据形态；它不证明资源已销毁，也不证明是谁摘的。
+   *  - `present`     registry 明确读到了这一行。**它不证明这一行是我们的**：
+   *                  内容指纹可以被复制，账本行可以被改写，而 disposer 根本
+   *                  不携带身份。所以 `present` 只能把问题交回给调用方当
+   *                  `unknown`，不能拿去当"还在"或"不是我们的"。
+   *  - `unreadable`  其它一切：服务缺席、身份对不上（另一个 registry 实例、
+   *                  令牌为空的抖动 getter）、普通 Error、序列化失败、空返回。
+   *                  一律不算"不在"——**看不清楚的时候，唯一安全的答案是不知道**。
+   *
+   * 刻意不用 `list()`：它逐条 `await diagnostic()`，返回的是调用瞬间的快照，
+   * 中途被删的行照样出现在结果里。也不用 `resolve()`：同理，它在拿到记录之后
+   * 还会 await。`readDocument()` 是唯一同步读 `definitions` 的读法。
+   *
+   * @param {string} id
+   * @param {{serial: number} | null | undefined} ownerToken 账本行登记时用的 registry 身份
+   * @returns {Promise<"absent" | "present" | "unreadable">}
+   */
+  async function presenceOf(id, ownerToken) {
+    try {
+      if (ownerToken === undefined || ownerToken === null) return "unreadable";
+      if (registryToken === null || registryToken !== ownerToken) return "unreadable";
+      const registry = registryRef;
+      if (registry === null || typeof registry.readDocument !== "function") return "unreadable";
+      const document = await registry.readDocument(id);
+      return document === undefined || document === null ? "unreadable" : "present";
+    } catch (error) {
+      return isPresetNotFound(error) ? "absent" : "unreadable";
+    }
+  }
+
+
   /** 会话诞生时所在的团队，否则为 `null`。 */
   function teamNameForPreset(presetId) {
     const found = teamPresets.get(oneLine(presetId));
@@ -200,7 +339,7 @@ export function installPanelOps(ctx, deps) {
    * 那次写入失败，比警告一声更糟。
    */
   /**
-   * 卸下一个团队行：先记账，再动注册。
+   * 卸下一个团队行：先卸注册、复核注册表、确认摘除之后才记账。
    *
    * 两半一起动是刻意的。id -> 名字的映射是 `/waifu-team` 和默认 preset 行
    * 读取的东西，映射比注册活得久，会把它们送向注册表里已经没有的预设——
@@ -208,53 +347,45 @@ export function installPanelOps(ctx, deps) {
    * 描述的是这一行（`=== entry.name`）时才丢弃：孪生实例可能已把两半都
    * 换掉了，抹掉它的映射就是把同样的错误反着再犯一遍。
    *
-   * 卸载失败就把行放回去。`dispose` 抛出时注册在平台侧仍然活着，而一行
-   * 谁也看不见的行，后续任何一轮都无法重试：下一次尝试会在它之上注册，
-   * 撞上 `Duplicate agent preset`，永远警告却永远恢复不了。
+   * 失败**不再等于「注册还在」**：宿主在抛错之前就把名册行删了。所以判定
+   * 只看 `releaseEntry` 的结论——`present` 与 `unreadable` 都算 `unknown`，
+   * 行留着，映射也留着，下一轮同步会**重新问一次注册表**（不会再发一次
+   * disposer，那个已经花掉了）。
    *
    * @param {string} id
    * @param {{ dispose: () => Promise<unknown>, name: string }} entry
-   * @returns {Promise<boolean>} 注册是否已经消失
+   * @returns {Promise<boolean>} 注册是否**已确认**摘除（`false` = 不是我们的，或看不清）
    */
   async function detachTeamRow(id, entry) {
-    /*
-     * 仅当账本里仍恰好是这一行时才删除。
-     *
-     * 如今每一轮都走共享的 `teamSyncs` 链，调用方读取与本删除之间不会有
-     * 其他轮写入——这个条件不可达，而这正是要把它写下来的原因：无条件
-     * 删除之所以安全，只是因为四十行开外的一个保证。否则，未来某个不经
-     * 这条链直达 `runTeamPresetSync` 的调用方，或某个落到这里的 dispose
-     * 钩子，就会删掉孪生的行、连它的名字映射一起带走——一个实例抹掉了
-     * 另一个实例的活跃注册。
-     */
-    if (teamOwned.get(id) === entry) teamOwned.delete(id);
     try {
-      await entry.dispose();
+      /*
+       * 身份、单飞、三态判定都在 `releaseEntry` 里，这里只剩团队自己那点
+       * 副作用：名字映射。它只在「确实删掉了自己那一行」之后才该走——孪生
+       * 换过行之后，映射描述的是孪生。
+       */
+      const released = await releaseEntry(teamOwned, id, entry, () => {
+        if (teamPresets.get(id) === entry.name) teamPresets.delete(id);
+      });
+      if (!released) {
+        ctx.logger?.warn?.(`dsh-waifu-agents: 团队预设「${entry.name}」：${releaseDiagnostic(entry.releaseError)}`);
+      }
+      return released;
     } catch (error) {
-      // 把行放回去，名字映射原封不动：卸载失败意味着注册在平台侧还活着，
-      // 映射仍然是事实。一行谁也看不见的行，后续任何一轮都无法重试——
-      // 下一次尝试会在它之上注册，撞上 `Duplicate agent preset`，永远警告
-      // 却永远恢复不了。
-      //
-      // 只有在卸载期间没有其他实例认领这个 id 时才恢复；覆写一个活跃孪生
-      // 实例的行，会让真正能用它的实例看不见它。
-      if (!teamOwned.has(id)) teamOwned.set(id, entry);
+      /*
+       * 走到这里只可能是 `releaseEntry` 自己出了意外（它内部已经把 disposer
+       * 与复核的异常都收干净了）。行原样留着，下一轮再判断。
+       */
       ctx.logger?.warn?.(
         `dsh-waifu-agents: 卸下团队预设「${entry.name}」失败：${error?.message ?? error}`,
       );
       return false;
     }
-    /*
-     * 注册已经消失，映射必须跟着走——但前提是没有人在此期间换掉这一行。
-     * 孪生实例注册同一个团队会写同一个名字，所以光看名字分不清这映射是
-     * 谁的；空账本才能。
-     */
-    if (!teamOwned.has(id) && teamPresets.get(id) === entry.name) teamPresets.delete(id);
-    return true;
   }
 
   async function runTeamPresetSync() {
     if (teamRuntimeOf() === null) return;
+    /* 登记用的 registry 就是我们复核时问的那一个；见 `registryNow`。 */
+    const registry = registryNow() ?? ctx.agentPresets;
     const store = teamRuntimeOf().store();
     const wanted = new Map();
     const taken = new Set();
@@ -281,21 +412,48 @@ export function installPanelOps(ctx, deps) {
      */
     for (const [id, entry] of [...teamOwned]) {
       if (entry.applied !== teamToken) continue;
+      /*
+       * 只有 `active` 的行才算健康。`releasing` 正在飞（等它自己结束，不许再发
+       * 一次请求）；`suspect` / `unknown` 是「上一次判定没结论」——行留着是对
+       * 的，但**不能当成健康行跳过**：下一轮必须再问一次注册表，而那次重试
+       * 只发生在 `detachTeamRow` 里。老构建写下的行没有 `state`，按健康算。
+       */
       const want = wanted.get(id);
-      if (want !== undefined && want.name === entry.name && want.description === entry.description) continue;
+      if (
+        isHealthyRow(entry) &&
+        want !== undefined &&
+        want.name === entry.name &&
+        want.description === entry.description
+      )
+        continue;
       await detachTeamRow(id, entry);
     }
     let at = 0;
     for (const [id, want] of wanted) {
       at += 1;
-      const held = teamOwned.get(id);
+      let held = teamOwned.get(id);
       if (
         held !== undefined &&
+        isHealthyRow(held) &&
         held.applied === teamToken &&
         held.name === want.name &&
         held.description === want.description
       )
         continue;
+      /*
+       * 看不清的行不许自动接管：我们既证明不了它是我们的，也证明不了它不是我
+       * 们的，而任何「重新注册」都会先要求一次注销。出口只有一个——那个 id
+       * 从注册表消失。`presenceOf` 只读名册、不发平台调用，所以可以放心地
+       * 每轮问一次；问到 `absent` 才清账本行，然后照常注册。
+       */
+      if (held !== undefined && held.state === "unknown") {
+        if ((await presenceOf(id, held.registry)) !== "absent") continue;
+        if (teamOwned.get(id) === held) {
+          teamOwned.delete(id);
+          if (teamPresets.get(id) === held.name) teamPresets.delete(id);
+        }
+        held = undefined;
+      }
       /*
        * 别的实例写下的行——或者我们自己的过期行，或者文本变了的行——
        * 不能直接收编。它的 disposer 属于一个随创建它的 fiber 一起消亡的
@@ -319,21 +477,47 @@ export function installPanelOps(ctx, deps) {
           null,
           TEAM_ORDER_BASE,
         );
-        const dispose = await ctx.agentPresets.register(definition);
+        const platformDispose = await registry.register(definition);
         /*
-         * 两件事，与人设那一半同构。本 fiber 消亡时退掉这一行，且仅当账本
-         * 里仍是这份注册时才退：孪生实例可能已经把它换掉了，本实例死亡
-         * 不得抹掉替换者的记录或它的名字映射。
+         * 与人设那一半同构：一次性消费 + `releasing` 防重复 + 三态复核，全部
+         * 走 `makeRetirement` / `releaseEntry`，团队这一侧不再有自己的一套。
+         *
+         * 单飞仍然承重：同一个原始 disposer 有两条生命周期会来要它——
+         * `detachTeamRow`（同步、卸载）与本 fiber 的 dispose 钩子（死亡）。两条
+         * 撞在一起时，平台的 disposer 按 id 删、不认持有者，第二次调用删的是
+         * 「此刻占着这个 id 的那一份」，而那可能已经是孪生刚注册上的。
+         *
+         * 但「可重试」不再靠清空槽位：失败之后 disposer 已经花掉，重试**只**
+         * 重新问一次注册表（`presenceOf`），不会再发一次平台调用。
+         */
+        const retirement = makeRetirement(platformDispose);
+        const retire = retirement.dispose;
+        const entry = {
+          dispose: retire,
+          applied: teamToken,
+          registry: registryToken,
+          state: "active",
+          name: want.name,
+          description: want.description,
+        };
+        /*
+         * 本 fiber 消亡时退掉这一行，且仅当账本里仍是这份注册时才退：孪生
+         * 实例可能已经把它换掉了，本实例死亡不得抹掉替换者的记录或它的名字
+         * 映射。
+         *
+         * 状态由 `releaseEntry` 写：`detached`/`cleanupError` 时行已经没了，
+         * `unknown` 时行留着且 `state !== "active"`，下一轮同步因此不会把它
+         * 当健康行跳过——那正是原来 `stale` 标记在做的事，现在由判定本身给出，
+         * 不需要再手工补一个字段。
          */
         ctx.on("dispose", () => {
-          const current = teamOwned.get(id);
-          if (current !== undefined && current.dispose === dispose) {
-            teamOwned.delete(id);
+          return releaseEntry(teamOwned, id, entry, () => {
             if (teamPresets.get(id) === want.name) teamPresets.delete(id);
-          }
-          return dispose();
+          }).then((released) => {
+            if (!released) ctx.logger?.warn?.(`dsh-waifu-agents: 团队预设「${want.name}」：${releaseDiagnostic(entry.releaseError)}`);
+          });
         });
-        teamOwned.set(id, { dispose, applied: teamToken, ...want });
+        teamOwned.set(id, entry);
         teamPresets.set(id, want.name);
       } catch (error) {
         ctx.logger?.warn?.(
@@ -414,12 +598,164 @@ export function installPanelOps(ctx, deps) {
     return `${base}-${Date.now()}`;
   }
 
+  /**
+   * 这一行是不是「登记着、而且我们有理由相信它还登记着」。
+   *
+   * 只有 `active` 算健康。`releasing` 在飞、`suspect` 刚失手、`unknown` 看不清、
+   * `detached`/`cleanupError` 已经从账本里删掉了（正常情况下读不到）。老构建
+   * 写下的行没有 `state` 字段，按健康算——升级之前它们确实是健康的。
+   *
+   * @param {{ state?: string }} entry
+   * @returns {boolean}
+   */
+  function isHealthyRow(entry) {
+    return entry.state === undefined || entry.state === "active";
+  }
+
+  /**
+   * 把平台的 disposer 包成**一次性**的，并且记住它第一次的结果。
+   *
+   * 一劳永逸的理由不是安全（宿主自己就有 `disposed` 标志，第二次调用是空转），
+   * 而是**诚实**：第一次若抛错，槽位原来会被清空，下一轮于是再发一次同一个
+   * disposer——那一次在宿主侧什么都不做、但会 resolve，于是插件把一次空转
+   * 记成了成功。用户看到的是「第一次说没卸下来，第二次什么都没变却说好了」。
+   *
+   * 所以三条：
+   *
+   *  1. `spent` 保存**第一次**调用产生的 promise，永不重发；
+   *  2. reject 也照样留着——调用方每次 `await` 都会拿到同一个失败，而不是
+   *     一个假的成功；
+   *  3. 创建时立刻挂一个空 `catch`，否则没人 await 的 rejected promise 会升级
+   *     成 `unhandledRejection`，在高版本 Node 上直接终止进程。
+   *
+   * @param {() => Promise<unknown>} platformDispose
+   * @returns {{ dispose: () => Promise<unknown>, outcome: () => ({ ok: boolean, error: unknown } | null) }}
+   */
+  function makeRetirement(platformDispose) {
+    let spent = null;
+    let outcome = null;
+    const dispose = () => {
+      if (spent === null) {
+        spent = (async () => platformDispose())().then(
+          (value) => {
+            outcome = { ok: true, error: null };
+            return value;
+          },
+          (error) => {
+            outcome = { ok: false, error };
+            throw error;
+          },
+        );
+        spent.catch(() => {});
+      }
+      return spent;
+    };
+    return { dispose, outcome: () => outcome };
+  }
+
+  /**
+   * 释放一份注册的**唯一**写法。
+   *
+   * 四条路径（`unregister`、人设 dispose 钩子、`detachTeamRow`、团队 dispose
+   * 钩子）共用它。它现在管的不只是顺序，还有**判定**：
+   *
+   *   1. **身份**：账本里那一行不是这一份注册，就不是我的事——不动。孪生实例
+   *      可能已经把行换成它的了。
+   *   2. **状态先落地**：`active → releasing` 写在第一个 `await` **之前**。
+   *      扫描用的是循环外取的花名册快照，不同步登记就会对同一行再发一次释放
+   *      请求；写在这里，第二次请求看到 `releasing` 就并到同一个 promise 上。
+   *   3. **单飞**：第二次请求拿到的是 `releasePromise`，不是第二次平台调用。
+   *   4. **判定不看 disposer 的返回值**：宿主唯一会抛的地方在
+   *      `definitions.delete` **之后**，所以 reject 不等于"还在"、resolve 也不
+   *      等于"销毁了"。真正的判据只有一次 `presenceOf()`：
+   *
+   *        | disposer | presence    | 结果                                        |
+   *        |----------|-------------|---------------------------------------------|
+   *        | resolve  | absent      | `detached`   —— 摘除了，资源状态不可观测     |
+   *        | reject   | absent      | `cleanupError` —— 摘除了，但后续清理报了错    |
+   *        | 任意     | present     | `unknown`    —— 有人在，但证明不了是我们     |
+   *        | 任意     | unreadable  | `unknown`    —— 看不清，不许猜               |
+   *
+   * 只有 `absent` 允许清账本行——行留着会让扫描以为这份注册还在，清早了则
+   * 会把一份还活着的注册变成孤儿。两者都只能在证据到位时选。
+   *
+   * `unknown` 的行留在原地：它的 disposer 已经花掉（`retire` 的 `spent`），
+   * 再调也不会产生任何平台动作，于是下一轮可以安全地**只再问一次**
+   * `presenceOf()`。这就是 `unknown` 唯一的自动出口：等那个 id 从注册表消失。
+   *
+   * @param {Map<string, object>} ledger `owned` 或 `teamOwned`
+   * @param {string} id
+   * @param {{ dispose: () => Promise<unknown>, registry?: object, state?: string }} entry
+   * @param {() => void} [onReleased] 只在确认摘除并删掉了自己那一行之后才跑
+   * @returns {Promise<boolean>} 这份注册是否**已确认**不在了（`false` = 不是我们的，或看不清）
+   */
+  async function releaseEntry(ledger, id, entry, onReleased) {
+    if (ledger.get(id) !== entry) return false;
+    if (entry.releasePromise !== undefined) return entry.releasePromise;
+
+    entry.state = "releasing";
+    entry.releasePromise = (async () => {
+      let failure = null;
+      try {
+        await entry.dispose();
+      } catch (error) {
+        failure = error ?? new Error("dispose failed");
+        entry.state = "suspect";
+      }
+      const presence = await presenceOf(id, entry.registry);
+      if (presence !== "absent") {
+        entry.state = "unknown";
+        entry.releaseError = failure ?? new Error("无法确认这个 id 上的注册是否仍然存在");
+        return false;
+      }
+      entry.state = failure === null ? "detached" : "cleanupError";
+      entry.releaseError = failure;
+      if (failure !== null) {
+        /*
+         * 清理失败只在这一处报告：每一条释放路径（面板 op、扫描、两条钩子、
+         * 团队同步）都从这里过，散在调用方里就会漏掉 `remove`/`update` 这种
+         * 不经过钩子的路径——那正是它以前完全不可见的原因。
+         */
+        ctx.logger?.warn?.(`dsh-waifu-agents: ${cleanupDiagnostic(failure)}（${id}）`);
+      }
+      if (ledger.get(id) === entry) {
+        ledger.delete(id);
+        if (typeof onReleased === "function") onReleased();
+      }
+      return true;
+    })();
+
+    try {
+      return await entry.releasePromise;
+    } finally {
+      /*
+       * 槽位只用来合并**同时在飞**的请求，用完就清：`unknown` 的行还留在账本
+       * 里，下一轮必须能再问一次 `presenceOf()`（问的只是注册表，不是 disposer，
+       * 不会产生第二次平台调用）。
+       */
+      entry.releasePromise = undefined;
+    }
+  }
+
+
+  /**
+   * 卸下一个人设的注册。
+   *
+   * 返回的不再是布尔：调用方需要分清「确认摘除了」与「说不清」——前者可以
+   * 接着注册新的，后者必须停下并如实报告。`state` 取自账本行本身（`releaseEntry`
+   * 在返回之前就写好了），所以它描述的是**这一次**判定的结论。
+   *
+   * 账本里没有这一行时回 `foreign`：我们手里没有任何「这一份注册」的凭据，
+   * 调用方不该据此宣称卸掉了什么（`remove` 的 `wasRegistered` 就是这么来的）。
+   *
+   * @param {string} id
+   * @returns {Promise<{ ok: boolean, state: string, error: unknown }>}
+   */
   async function unregister(id) {
     const entry = owned.get(id);
-    if (entry === undefined) return false;
-    owned.delete(id);
-    await entry.dispose();
-    return true;
+    if (entry === undefined) return { ok: false, state: "foreign", error: null };
+    const ok = await releaseEntry(owned, id, entry);
+    return { ok, state: entry.state, error: entry.releaseError ?? null };
   }
 
   /**
@@ -438,10 +774,116 @@ export function installPanelOps(ctx, deps) {
   }
 
   /**
+   * 「这一位的注册此刻说不清」的人话。
+   *
+   * 读宿主源码之前，这条文案说的是「旧注册这次没卸下来」——那是错的：宿主
+   * 的 disposer 在抛错之前就已经把 `definitions` 那一行删了，所以「失败」从来
+   * 不等于「还在」。现在能说的只有一句实话：**看不清**。说不清就不动文件，
+   * 也不宣称任何一侧的结果。
+   *
+   * 与 {@link registrationFailure} 分开，是因为下一步不同：那条讲「这个 id
+   * 被上一版实例占着」，能做的只有重启；这条讲「刷新会重新确认一次」。
+   *
+   * **不带平台原文。** 以前这里拼的是 `：${registrationFailure(error)}`，而
+   * `registrationFailure` 只翻译 `Duplicate agent preset` 那一种，其余原样返回
+   * ——于是用户在面板上读到的是一条「……无法确认是否还挂在 DSH 上：dispose
+   * cleanup boom(after-delete)」的句子（R14）。那句原文是给我们看的证据，不是
+   * 给用户看的解释，现在只走 {@link releaseDiagnostic} 进日志。
+   */
+  function releaseFailure() {
+    return (
+      "这一位的注册此刻无法确认是否还挂在 DSH 上。" +
+      "文件没有改动；刷新或再点一次都会重新确认，完全退出 DSH 再打开也能恢复。"
+    );
+  }
+
+  /**
+   * {@link releaseFailure} 的日志版本：同一句话 + 平台原文。
+   *
+   * 只许出现在 `logger.warn` 里。`unknown` 这一格最缺的正是证据——面板上必须
+   * 是干净的人话，日志里必须有「到底是什么抛了」，两边不能是同一份文本。
+   *
+   * @param {unknown} error
+   */
+  function releaseDiagnostic(error) {
+    return withDetail(releaseFailure(), error);
+  }
+
+  /**
+   * 「注册摘掉了，但 DSH 那边的资源清理报了错」。
+   *
+   * 只报事实，不许说成「资源还在」——`users > 0` 时宿主本来就会推迟销毁，
+   * 插件看不到 `users`、也看不到 `scope.disposed`，两种情形在观测面上完全一样。
+   *
+   * 同样不带平台原文：`cleanupError` 的行会进 `scan` 的 `problems`，那是面板
+   * 渲染的字段（R14 的另一处）。
+   */
+  function cleanupFailure() {
+    return "这一位的注册已经从 DSH 摘下来了，但它那边的资源清理报了一个错。这不影响使用，也不需要重试。";
+  }
+
+  /**
+   * {@link cleanupFailure} 的日志版本。理由同上：原文进日志，不进面板。
+   *
+   * @param {unknown} error
+   */
+  function cleanupDiagnostic(error) {
+    return withDetail(cleanupFailure(), error);
+  }
+
+  /**
+   * 把一句人话和一条原始错误接起来。原文缺失时只回人话，不留一个空括号。
+   *
+   * @param {string} text
+   * @param {unknown} error
+   */
+  function withDetail(text, error) {
+    const detail = String(error?.message ?? error ?? "").trim();
+    return detail === "" ? text : `${text}（原始错误：${detail}）`;
+  }
+
+  /**
+   * 新建任务页的读法：默认人设 → 有分组的人设 → 没分组的人设。
+   *
+   * 这三段由 {@link presetPlacement} 算成注册表的排序键，而组与组之间的
+   * 先后只有这里知道——要读整份目录。扫描在循环外读一次（`seatingOf`），
+   * 单点注册（新建/编辑）现读一次：它们本来就是"一次目录读取换一次顺序
+   * 正确"，而扫描里逐条读会把 N 份人设读成 N² 份。
+   */
+  function seatingOf(rows) {
+    return {
+      groups: [...new Set(rows.map((row) => oneLine(row.group)).filter((name) => name !== ""))].sort((a, b) =>
+        a.localeCompare(b),
+      ),
+      mark: oneLine(defaultCache?.()?.id),
+    };
+  }
+
+  /**
+   * 一位人设的排位。`seating` 缺省时现读一份目录——调用方只有新建/编辑那
+   * 两个本来就不在扫描里的路径。
+   * @param {string} id
+   * @param {{group?: unknown, order?: unknown}} meta
+   * @param {{groups: string[], mark: string}} [seating]
+   */
+  function placementOf(id, meta, seating) {
+    const frame = seating ?? seatingOf(listFiles());
+    const group = oneLine(meta?.group);
+    const rank = group === "" ? 0 : frame.groups.indexOf(group);
+    return presetPlacement({
+      isDefault: frame.mark !== "" && frame.mark === id,
+      group,
+      /* 组名不在表里（刚写下的新组）：排在已有的组之后，仍在意料之中。 */
+      groupRank: rank < 0 ? frame.groups.length : rank,
+      localOrder: normalizeOrder(meta?.order),
+    });
+  }
+
+  /**
    * 先组装，再注册。校验放在这里而不是每个调用方，任何一条路径——面板、
    * 命令或扫描——都注册不出提示词渲染器咽不下去的正文。
    */
-  async function registerOne(id, meta, body) {
+  async function registerOne(id, meta, body, seating) {
     const templateIssue = templateProblem(meta);
     if (templateIssue !== null) throw new Error(templateIssue);
     const skeleton = skeletonFor(meta, readSkeleton());
@@ -452,8 +894,10 @@ export function installPanelOps(ctx, deps) {
       skeleton === null ? null : skeleton.text,
     );
     if (!poured.ok) throw new Error(poured.problems.join("；"));
-    const platformDispose = await ctx.agentPresets.register(
-      buildDefinition(id, meta, body, templateRowsFor("persona"), skeleton),
+    const seat = placementOf(id, meta, seating);
+    const registry = registryNow() ?? ctx.agentPresets;
+    const platformDispose = await registry.register(
+      buildDefinition(id, meta, body, templateRowsFor("persona"), skeleton, undefined, seat),
     );
     /*
      * 最终只有一次调用会到达 `platformDispose`。
@@ -463,23 +907,14 @@ export function installPanelOps(ctx, deps) {
      * 不知道自己在删哪份注册，所以接管方 `register` 之后再落进来一次调用，
      * 就会删掉接管方（TAKER）的预设——这正是死实例越界掏空活实例的路径。
      *
-     * 单飞（single-flight）补上了身份检查补不上的时序漏洞：在 `unregister`
-     * 删行与 `registerOne` 写替代行之间，账本是空的，这个窗口里触发的
-     * 钩子看不到可比较的持有者，否则就会盲删。
+     * 单飞（single-flight）补上了身份检查补不上的时序漏洞：两个调用方同时
+     * 请求时，第二次拿到的是同一个 promise，不是第二次平台调用。
      *
-     * 设计上可重试：一次抛出会清空槽位，让下一次尝试再来，这保证暂时
-     * 失败的卸载不会悄悄把一份注册变成孤儿。
+     * 一次性（`makeRetirement`）补的是另一半：失败之后槽位**不再清空**，所以
+     * 下一轮拿到的是同一个失败的 promise，而不是第二次平台调用——那一次在
+     * 宿主侧只会空转并 resolve，把一次空转记成成功（R6）。
      */
-    let retirement = null;
-    const retire = () => {
-      if (retirement === null) {
-        retirement = (async () => platformDispose())();
-        retirement.catch(() => {
-          retirement = null;
-        });
-      }
-      return retirement;
-    };
+    const { dispose: retire } = makeRetirement(platformDispose);
     /*
      * 一个钩子里干两件事。显而易见的那件：本实例 fiber 消亡时注销预设。
      * 记账的那件：把我们自己的条目从 `REG_STATE.owned` 里移除——且只移除
@@ -490,26 +925,48 @@ export function installPanelOps(ctx, deps) {
      *
      * 替换的情形绝不能 dispose。接管该行的路上会跑本实例的 disposer（见
      * `unregister`），所以这里的第二次调用不是无害的重复——它是对当前
-     * 持有该 id 者的一次删除。身份就是全部守卫；`retire` 是行短暂缺席
-     * 窗口期的保险。
+     * 持有该 id 者的一次删除。身份就是全部守卫。
      *
-     * 顺序是与 `unregister` 的契约：它先删行、后 await disposer，所以显式
-     * 拆除到达这里时总是 `current === undefined`，且仍然 dispose。把那次
-     * `delete` 挪到某个 await 之后，这个钩子就会看到自己的行，走进
-     * `current.dispose === retire` 分支——依然正确。挪到 await 本身之后，
-     * 一次改名/更新就会让注册还活着、账本上却什么都没有。
+     * 与 `unregister` 的契约是「先卸、复核、再清账」（见 `releaseEntry`）：
+     * 显式拆除到达这里时，账本里**仍然是这一行**（`current.dispose === retire`），
+     * 于是并到同一个 `releasePromise` 上。两条路都不会产生第二次平台调用。
+     *
+     * **账本里没有这一行时什么也不做（R3）。** 这个分支以前是 `return retire()`
+     * ——它假定「行没了 ⇒ 那份注册还是我的」，而这两件事之间没有任何证明：
+     *
+     *  - 帐本行可以被外力抹掉（孪生实例写过、就地升级共享了同一个对象、D1
+     *    时代的残留形状）；
+     *  - 而 `retire()` 删的是**注册表里那个 id**，不是「我注册的那一份」——平台
+     *    的 disposer 携带不了身份（H1/H2）。行没了、id 又被别人占着时，这一下
+     *    删的就是别人的注册，而对方没有任何办法自动恢复（R1b 演示的就是它）。
+     *
+     * 代价是一座极窄的孤儿窗口：`await registry.register(...)` 返回到
+     * `owned.set(...)` 之间，fiber 若恰好在此消亡，钩子看到的是「无行而有注册」，
+     * 于是那份注册会留下。按「安全边界优先于自动恢复」，这个代价是接受的
+     * ——留下的孤儿是可见的（扫描读到 `Duplicate` 就会提示重启），误删的是
+     * 另一个实例正在服务的会话，看不见也修不回来。
      */
     ctx.on("dispose", () => {
       const current = owned.get(id);
-      if (current !== undefined && current.dispose !== retire) return undefined;
-      if (current !== undefined) owned.delete(id);
-      return retire();
+      if (current === undefined) return undefined;
+      if (current.dispose !== retire) return undefined;
+      return releaseEntry(owned, id, current).then((released) => {
+        /* `cleanupError` 的日志在 `releaseEntry` 里（每条路径都会走到），这里只补一句「说不清」。 */
+        if (!released) ctx.logger?.warn?.(`dsh-waifu-agents: ${id}: ${releaseDiagnostic(current.releaseError)}`);
+      });
     });
     owned.set(id, {
       dispose: retire,
-      rev: registrationRev(skeleton, body, currentModeOf()),
+      rev: registrationRev(skeleton, body, currentModeOf(), seat),
       applied: instToken,
       epoch: instEpoch,
+      /*
+       * 这一行登记在**哪个注册表对象**里。复核（`presenceOf`）拿它和当前
+       * registry 的身份比值：对不上就不许下结论——那是 R13 的边界，热重载
+       * 之后新实例的 `not-found` 不代表旧实例已经摘除。
+       */
+      registry: registryToken,
+      state: "active",
     });
   }
 
@@ -588,7 +1045,14 @@ export function installPanelOps(ctx, deps) {
     const reloaded = [];
     const skipped = [];
     const problems = [];
-    for (const item of listFiles()) {
+    const rows = listFiles();
+    /*
+     * 一次目录读取定下组与组的先后，循环里只查表。排位进 rev，所以「谁被
+     * 设成默认」「谁换了组」这类不碰正文的改动也会在下一次扫描时重新注册
+     * ——否则新建任务列表的顺序要等到重启才变。
+     */
+    const seating = seatingOf(rows);
+    for (const item of rows) {
       if (!item.idOk) {
         problems.push(
           `${item.id}.md: 文件名不是合法的 preset id（只允许字母、数字、连字符，可以中文）`,
@@ -608,6 +1072,7 @@ export function installPanelOps(ctx, deps) {
         skeletonFor(parsed.meta, readSkeleton()),
         parsed.body,
         currentModeOf(),
+        placementOf(item.id, item, seating),
       );
       /*
        * 下方所有分支共用的一道守卫：一个正在注册途中的 id（由本扫描在
@@ -619,6 +1084,45 @@ export function installPanelOps(ctx, deps) {
       const owner = owned.get(item.id);
       if (owner !== undefined) {
         const mine = owner.applied === instToken;
+        /*
+         * `releasing` 在飞：这批行是循环外取的花名册快照对应的账本，而释放
+         * 正拿着同一个 id 在等宿主。再发一次请求没有意义（`releaseEntry` 会
+         * 并到同一个 promise），扫描也不该等它——等就等于把整条 `scans` 链
+         * 押在别人的释放上（R7 的形态）。
+         */
+        if (owner.state === "releasing") continue;
+        /*
+         * `unknown`：上一次释放既没拿到 `absent`、也没能证明这一行不是我们的。
+         * 不许自动注销（那要再动一次 disposer，而它已经花掉了），不许强制
+         * 接管（会在一个可能还活着的注册上再注册一次）。
+         *
+         * 唯一的出口是**重新问一次注册表**：`presenceOf` 只读 `definitions`，
+         * 不发平台调用，所以问多少次都不会再碰那枚花掉的 disposer。问到了
+         * `absent` 才算拿到结论——账本行这时才可以清，然后照常接回来。
+         * 看不清就继续留着，把话说清楚，出口留给人（改名、或重启）。
+         */
+        if (owner.state === "unknown") {
+          const presence = await presenceOf(item.id, owner.registry);
+          if (presence !== "absent") {
+            problems.push(
+              `${item.id}: ${releaseFailure()}${
+                owner.releaseNote === undefined ? "" : `（${owner.releaseNote}）`
+              }`,
+            );
+            continue;
+          }
+          if (owned.get(item.id) === owner) owned.delete(item.id);
+          holdRegistration(item.id);
+          try {
+            await registerOne(item.id, parsed.meta, parsed.body, seating);
+            reloaded.push(item.id);
+          } catch (error) {
+            problems.push(`${item.id}: ${error.message ?? error}`);
+          } finally {
+            releaseRegistration(item.id);
+          }
+          continue;
+        }
         /*
          * 三个问题，三个回答：
          *
@@ -648,8 +1152,20 @@ export function installPanelOps(ctx, deps) {
          */
         holdRegistration(item.id);
         try {
-          await unregister(item.id);
-          await registerOne(item.id, parsed.meta, parsed.body);
+          const released = await unregister(item.id);
+          /*
+           * `foreign` 是「行在我读它之后被别人换掉了」——没有可释放的东西，
+           * 接着注册是对的。其余 `false` 只有一个来源：`unknown`，那时候
+           * 重新注册就是在赌，赌输的代价是一份活着的注册变成孤儿。
+           */
+          if (!released.ok && released.state !== "foreign") {
+            problems.push(`${item.id}: ${releaseFailure()}`);
+            continue;
+          }
+          if (released.ok && released.state === "cleanupError") {
+            problems.push(`${item.id}: ${cleanupFailure()}`);
+          }
+          await registerOne(item.id, parsed.meta, parsed.body, seating);
           reloaded.push(item.id);
         } catch (error) {
           problems.push(`${item.id}: ${error.message ?? error}`);
@@ -678,7 +1194,7 @@ export function installPanelOps(ctx, deps) {
       }
       holdRegistration(item.id);
       try {
-        await registerOne(item.id, parsed.meta, parsed.body);
+        await registerOne(item.id, parsed.meta, parsed.body, seating);
         added.push(item.id);
       } catch (error) {
         /*
@@ -991,6 +1507,12 @@ export function installPanelOps(ctx, deps) {
     } finally {
       releaseRegistration(id);
     }
+    /*
+     * 新写下的人设可能带来一个新的组名，而组与组的先后是全体共享的：
+     * 新组插进字母序中间，别的组的名次就变了。排位进了 rev，所以一次
+     * 后台扫描正好重建那些受影响的行——不等它，新建的响应不该为排序拖延。
+     */
+    void scan().catch(() => {});
     return {
       ok: true,
       id,
@@ -1088,9 +1610,26 @@ export function installPanelOps(ctx, deps) {
      */
     holdRegistration(id);
     holdRegistration(to);
+    /*
+     * 分两步记下失败发生在哪一段：注销还是注册。两者的下一步不一样——注销
+     * 拿到了 `unknown` 时旧注册可能还活着，补注册必然撞 `Duplicate`；注册
+     * 失败时旧注册已经卸掉了，必须补回来，否则那一行到下次刷新前都是空的。
+     *
+     * `cleanupError` 不算注销失败：注册**确实**摘掉了，只是宿主那边的资源
+     * 清理报了错。停在这里什么也不做，反而会把一个可以继续的状态当成坏的。
+     */
+    let stage = "release";
+    let releaseProblem = null;
     try {
-      await unregister(id);
-      await registerOne(to, next, next.body);
+      const released = await unregister(id);
+      if (!released.ok && released.state !== "foreign") {
+        stage = "release";
+        releaseProblem = releaseFailure();
+      } else {
+        stage = "register";
+        await registerOne(to, next, next.body);
+      }
+      if (releaseProblem !== null) throw new Error(releaseProblem);
     } catch (error) {
       if (moved) {
         try {
@@ -1100,20 +1639,30 @@ export function installPanelOps(ctx, deps) {
         }
       }
       writeAtomic(full, original);
-      try {
-        await registerOne(id, current.meta, current.body);
-      } catch {
-        // 无论如何文本都在磁盘上；缺一份注册，刷新一下就能补上。
+      if (!owned.has(id)) {
+        try {
+          await registerOne(id, current.meta, current.body);
+        } catch {
+          // 无论如何文本都在磁盘上；缺一份注册，刷新一下就能补上。
+        }
       }
       return {
         ok: false,
-        error: `注册失败（文件已还原，点刷新可重试）：${registrationFailure(error)}`,
+        error:
+          stage === "release" && releaseProblem !== null
+            ? `注销失败（文件已还原，点刷新可重试）：${releaseProblem}`
+            : `注册失败（文件已还原，点刷新可重试）：${registrationFailure(error)}`,
       };
     } finally {
       releaseRegistration(id);
       releaseRegistration(to);
     }
     const defaultFollowed = moved ? await repointDefault(id, to) : "unchanged";
+    /*
+     * 换了组就换了排位，而组的名次是全体共享的（新组名会挤动别的组）。
+     * 一次后台扫描把受影响的行重建；组没变时它什么也不做。
+     */
+    if (oneLine(next.group) !== oneLine(current.meta.group)) void scan().catch(() => {});
     return {
       ok: true,
       id: to,
@@ -1157,7 +1706,21 @@ export function installPanelOps(ctx, deps) {
     holdRegistration(from);
     holdRegistration(to);
     try {
-      await unregister(from);
+      const released = await unregister(from);
+      if (!released.ok && released.state !== "foreign") {
+        /*
+         * 旧注册此刻说不清（`unknown`），而文件已经改名了。**必须搬回去**：
+         * 留着「新名字的文件 + 旧名字的注册」，用户在面板里点旧行拿到的是
+         * 空正文（文件不在那里），点新行又打不开（没注册）——两边都是坏的，
+         * 而且刷新救不了旧 id（扫描只遍历 `*.md`，孤儿注册再没人回收）。
+         *
+         * 搬不回去就让 fs 的错误照常冒上去（与下面注册失败那条路一致）：
+         * 文件停在新名字上，下一次扫描会把它收编，这比在一个已知损坏的状态
+         * 上再叠一次注册安全，也比谎称「已回滚」诚实。
+         */
+        fs.renameSync(toFile, fromFile);
+        throw new Error(releaseFailure());
+      }
       try {
         await registerOne(to, meta, body);
       } catch (error) {
@@ -1171,7 +1734,7 @@ export function installPanelOps(ctx, deps) {
         }
         return {
           ok: false,
-          error: `改名失败（已回滚）：${error.message ?? error}`,
+          error: `改名失败（已回滚）：${registrationFailure(error)}`,
         };
       }
     } finally {
@@ -1272,11 +1835,41 @@ export function installPanelOps(ctx, deps) {
      */
     holdRegistration(id);
     let wasRegistered = false;
+    let releaseError = null;
     try {
-      wasRegistered = await unregister(id);
-      fs.renameSync(full, archived);
+      /*
+       * 注销失败与归档失败要分开：前者文件一个字都没动，可以说「文件内容没有
+       * 改动」；后者是磁盘自己的错，那句话就成了谎。两条都照旧冒到 HTTP 层
+       * （一次失败的删除不该以 200 回来），只是文案各自归位。
+       *
+       * 「失败」现在的含义是 **`unknown`**（说不清那一份注册还在不在），不再
+       * 是「disposer 抛了」——后者在宿主侧往往已经摘除成功。
+       */
+      try {
+        const released = await unregister(id);
+        wasRegistered = released.ok;
+        /*
+         * 不要在这里再拼一句 `releaseFailure()` 当兜底错误：`unregister` 报
+         * `ok:false` 且不是 `foreign` 时只有 `unknown` 一种来源，而下面那行
+         * 本来就会把它翻成人话——两处各拼一次，用户读到的是同一句话套自己
+         * （「……无法确认是否还挂在 DSH 上。文件没有改动；……。文件没有改动；
+         * ……」）。这里只要一个「有失败」的标记。
+         */
+        if (!released.ok && released.state !== "foreign") releaseError = released.error ?? new Error("unknown");
+      } catch (error) {
+        releaseError = error;
+      }
+      if (releaseError === null) fs.renameSync(full, archived);
     } finally {
       releaseRegistration(id);
+    }
+    if (releaseError !== null) {
+      /*
+       * 面板只拿人话；原文落日志。`remove` 不经过任何钩子，漏了这一行，
+       * `unknown` 唯一的那点证据就彻底没有了（R14）。
+       */
+      ctx.logger?.warn?.(`dsh-waifu-agents: ${id}: ${releaseDiagnostic(releaseError)}`);
+      throw new Error(releaseFailure());
     }
     /*
      * 过去，把默认所指的 wife 退场会让 `selectedDefault` 指向空处，注册表
@@ -2297,6 +2890,15 @@ export function installPanelOps(ctx, deps) {
           `顺手把 ${resettled.moved.length} 个还没开口的会话挪过去（${resettled.moved.join("、")}）。`,
       );
     }
+    /*
+     * 默认人设排在新任务列表的第一格，所以换默认就是换顺序——而顺序是
+     * 注册时写死的排序键。排位进了 rev，于是这里只需叫一次扫描：旧默认与
+     * 新默认这两行的 rev 变了，扫描只重建这两份注册，其余行空转。
+     *
+     * 不等它：用户等的是「默认已改」，不是「列表已重排」；扫描失败也只
+     * 影响顺序，不影响默认本身，所以不让它挡住这一次成功。
+     */
+    void scan().catch(() => {});
     return {
       ok: true,
       id: wanted,

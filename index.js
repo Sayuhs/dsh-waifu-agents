@@ -125,24 +125,27 @@ import {
   ENTRY_MAX_CHARS,
   MAX_MAX_ENTRIES,
   MIN_MAX_ENTRIES,
+  SNAPSHOT_LOCK,
   appendEntry,
   clearStore,
   clampEntryText,
   clampMaxEntries,
   effectiveEnabled,
+  forgetStore,
   listStoredIds,
   migratePersona,
+  mutateStore,
   personaConfigOf,
   readConfig,
   readStore,
   recallEntries,
   recentEntries,
   renderMemoryBlock,
-  screenEntry,
   trimToLimit,
   updateConfig,
   writeStore,
 } from "./persona-memory.js";
+import { runExclusive } from "./serialize.js";
 
 /**
  * 版本比较，重新导出以免包的公共接口面因更新机制搬到 `self-update.js` 而
@@ -271,6 +274,54 @@ export const PERSONA_ORDER_BASE = 10000;
  * 存在正是为了让这种事不可信。
  */
 export const TEAM_ORDER_BASE = 20000;
+
+/**
+ * 新建会话页里人设的三段位置：默认 → 有分组 → 没分组。
+ *
+ * `personas/` 的 `order:` 只说明"在这一组里排第几"，回答不了"先看谁"。
+ * 分组是用户自己做的归类，所以新建任务那张列表按这个顺序读最省事：
+ *
+ *   1. **默认人设**（`selectedDefault` 指名的那一位，通常也是新会话真正
+ *      挂上的那一位）—— 它要在第一屏就能点；
+ *   2. **有分组的人设**，按组名排序，组内按 `order:`；
+ *   3. **没分组的人设**，同样按 `order:`。
+ *
+ * 三段都在 {@link PERSONA_ORDER_BASE} 与 {@link TEAM_ORDER_BASE} 之间，
+ * 所以内建预设仍然在最前、团队仍然在人设之后。每段的宽度是 100，够放下
+ * 手写的 `order:` 而不会串段；组数上限 79 组，超过的部分并进最后一格
+ * （真实的目录远没有这么多组，但一个会算错的公式不该靠"应该不会"成立）。
+ */
+export const PERSONA_DEFAULT_ORDER = PERSONA_ORDER_BASE;
+export const PERSONA_GROUP_ORDER_BASE = PERSONA_ORDER_BASE + 100;
+export const PERSONA_UNGROUPED_ORDER_BASE = PERSONA_ORDER_BASE + 9000;
+
+/** 手写 `order:` 在段内能占的格子数（每格 1，最多 99）。 */
+const ORDER_SLOTS = 100;
+
+/** 分组排序能占的格子数。 @see PERSONA_GROUP_ORDER_BASE */
+const GROUP_SLOTS = 79;
+
+/**
+ * 一位人设在新建任务列表里的位置。
+ *
+ * 纯函数：输入是「这位人设自己的三个事实」，输出是注册表要的那个排序键。
+ * 组名的排序由调用方完成（它才知道全部人设），这里只要组的名次——把
+ * "读整个目录"塞进来会让这个函数无法在测试里断言。
+ *
+ * @param {{ isDefault?: boolean, group?: string, groupRank?: number, localOrder?: number|null }} input
+ * @returns {number}
+ */
+export function presetPlacement(input = {}) {
+  const local = normalizeOrder(input.localOrder);
+  const slot = local === undefined ? ORDER_SLOTS - 1 : Math.min(local, ORDER_SLOTS - 1);
+  if (input.isDefault === true) return PERSONA_DEFAULT_ORDER;
+  const group = oneLine(input.group);
+  if (group !== "") {
+    const rank = Math.min(Math.max(0, Math.trunc(Number(input.groupRank) || 0)), GROUP_SLOTS - 1);
+    return PERSONA_GROUP_ORDER_BASE + rank * ORDER_SLOTS + slot;
+  }
+  return PERSONA_UNGROUPED_ORDER_BASE + slot;
+}
 
 /**
  * 每个团队预设的 id 的开头。
@@ -779,15 +830,21 @@ export function chatRows(rows) {
  * 模式是指纹的一部分：拨动聊天开关会在不碰任何文件的情况下改变挂载的
  * 能力列表，忽略模式的 rev 会让 `scan()` 跳过每个人设，把旧工具集原样留在
  * 那里直到重启。
+ *
+ * 排位（`placement`）同理：把默认人设挪给别人、或把一个人设换到别的组，
+ * 挂载的文本一个字都没变，但新建任务列表的顺序变了。排位进了指纹，
+ * 这类改动才会在下一次扫描时真的重新注册，而不是等重启。
  * @param {{ text: string } | null} skeleton
  * @param {unknown} body
  * @param {unknown} [mode]
+ * @param {number} [placement]
  */
-export function registrationRev(skeleton, body, mode = "tools") {
+export function registrationRev(skeleton, body, mode = "tools", placement) {
   const frame =
     skeleton === null || skeleton === undefined ? "" : skeleton.text;
+  const seat = Number.isFinite(placement) ? `\u0000${placement}` : "";
   return revision(
-    `${normalizeMode(mode)}\u0000${frame}\u0000${String(body ?? "")}`,
+    `${normalizeMode(mode)}\u0000${frame}\u0000${String(body ?? "")}${seat}`,
   );
 }
 
@@ -1091,13 +1148,19 @@ export function reorderIds(ids, movedId, beforeId) {
  * 这里出去的 `order` 是移进本插件自己区段的局部 order——见
  * {@link PERSONA_ORDER_BASE}。没有自己 `order:` 的 wife 保持无排名
  * （`undefined`），在注册表中排最后、排在每条有排名的行之后，与从前一致。
+ *
+ * `placement` 是面板算好的「默认 → 分组 → 未分组」位置（{@link presetPlacement}）。
+ * 给了它就整份覆盖局部 order：新建任务列表读的是那个顺序，而文件里的
+ * `order:` 继续只负责组内排位。
  * @param {string} id - 预设 id（去掉 `.md` 的文件名）
  * @param {Record<string, unknown>} meta - 解析出的 front matter
  * @param {string} body - 存储状态的人设文本
  * @param {unknown[]} templateRows - 能力列表
  * @param {{ text: string } | null} [skeleton] - 共享骨架（若有）
+ * @param {number} [orderBase]
+ * @param {number} [placement] - 面板算出的排位；缺省时退回局部 order
  */
-export function buildDefinition(id, meta, body, templateRows, skeleton = null, orderBase = PERSONA_ORDER_BASE) {
+export function buildDefinition(id, meta, body, templateRows, skeleton = null, orderBase = PERSONA_ORDER_BASE, placement) {
   const name = oneLine(meta.name) || id;
   const localOrder = normalizeOrder(meta.order);
   const poured = assemble(name, body, skeleton === null ? null : skeleton.text);
@@ -1105,7 +1168,12 @@ export function buildDefinition(id, meta, body, templateRows, skeleton = null, o
     id,
     name,
     description: oneLine(meta.description) || undefined,
-    order: localOrder === undefined ? undefined : orderBase + localOrder,
+    order:
+      Number.isFinite(placement)
+        ? placement
+        : localOrder === undefined
+          ? undefined
+          : orderBase + localOrder,
     // `poured` 仍然要算：渲染器会拒绝的正文必须在面板保存它时就被拒绝，
     // 而不是等会话挂载它之后。
     plugins: templateRows.map((row) =>
@@ -2531,6 +2599,7 @@ export function apply(ctx, config = {}) {
     if (turn < 0) return;
     const key = `${sessionId}\u0000${turn}`;
     if (type === "turn/start") {
+      forgetStaleTurns(sessionId, turn);
       turnBuffers.set(key, { text: "", interrupted: false });
       /*
        * 在本回合的请求被构建之前重申闸门。
@@ -2568,6 +2637,41 @@ export function apply(ctx, config = {}) {
         `dsh-waifu-agents: 写入长期记忆失败：${error?.message ?? error}`,
       );
     });
+  }
+
+  /**
+   * 丢掉某会话里比 `turn` 更早的回合格子。
+   *
+   * `turn/end` 是唯一的正常出口，而宿主并不保证每一轮都走到那里（中断、
+   * 会话被换掉、进程在收尾前退出）。同一个会话开新一轮，就是"上一轮再也
+   * 不会来收尾"的证据，于是顺手把更早的格子清掉 —— Map 不再随着被放弃的
+   * 回合一路长下去。
+   * @param {string} sessionId
+   * @param {number} turn
+   */
+  function forgetStaleTurns(sessionId, turn) {
+    const prefix = `${sessionId}\u0000`;
+    for (const key of [...turnBuffers.keys()]) {
+      if (!key.startsWith(prefix)) continue;
+      const older = Number(key.slice(prefix.length));
+      if (Number.isFinite(older) && older < turn) turnBuffers.delete(key);
+    }
+  }
+
+  /**
+   * 一个 agent 被销毁时丢掉它的回合格子。
+   *
+   * 被销毁的 agent 不会再产出可写的一轮：还在飞的 `turn/end` 到达时格子已经
+   * 不在，于是什么都不写 —— 这正是想要的（那一轮没有交付给任何人）。
+   * 少了这一步，每个「没有 `turn/end` 的回合」都会在进程里留一份文本。
+   * @param {string} sessionId
+   */
+  function forgetSessionTurns(sessionId) {
+    if (sessionId === "") return;
+    const prefix = `${sessionId}\u0000`;
+    for (const key of [...turnBuffers.keys()]) {
+      if (key.startsWith(prefix)) turnBuffers.delete(key);
+    }
   }
 
   /** 已写回合的有界备忘，重复事件因此是空操作。 */
@@ -2626,19 +2730,40 @@ export function apply(ctx, config = {}) {
       // 被关掉的人设既不读也不积累。把全局开关关掉必须同时停住写入，
       // 否则"关"还会继续养大用户要求冻结的文件。
       if (!effectiveEnabled(snapshot.config, item.id)) continue;
-      const store =
-        snapshot.stores.get(item.id) ??
-        (await readStore(personaMemoryDir, item.id));
       const limit = personaConfigOf(snapshot.config, item.id).maxEntries;
-      const screen = screenEntry(store.entries, item.text);
-      if (screen.ok !== true) continue;
-      const next = appendEntry(
-        store,
-        { text: screen.text ?? item.text, source: item.source },
-        limit,
-      );
-      await writeStore(personaMemoryDir, next.store);
-      snapshot.stores.set(item.id, next.store);
+      /*
+       * 落盘走 `mutateStore`：**锁内重读**磁盘，再追加，再整份写回。
+       *
+       * 这里曾经的写法是「拿快照里那份当基底」（或快照没有时读一次），然后
+       * `await writeStore`。两个会话同时结束回合时，两次读都会落在任何一次
+       * 写之前，于是后写的那一份把先写的整份抹掉 —— 磁盘与内存里都不剩。
+       * 最容易撞上的是某个人设的**第一条**记忆：空库不进快照，两个回合会
+       * 各自读到空库，最后只剩一条。
+       *
+       * 锁的粒度是人设 id，所以不同人设的回合仍然并行。
+       */
+      const written = await mutateStore(personaMemoryDir, item.id, (store) => {
+        const next = appendEntry(
+          store,
+          { text: item.text, source: item.source },
+          limit,
+        );
+        /* 被筛查拦下（太短、重复、代码味）时不写盘。 */
+        if (next.added === null) return { write: false, result: next.reason };
+        return { store: next.store, result: next.added };
+      });
+      if (written.ok === true && written.store !== undefined) {
+        await noteStoreInSnapshot(item.id, written.store);
+      } else if (written.reason === "cleared") {
+        /* 用户在这一轮之前按了「清空」：这一轮的写入作废，正是清空该有的语义。 */
+        ctx.logger?.debug?.(
+          `dsh-waifu-agents: 人设「${item.id}」的这一次写入在清空之后才轮到，已丢弃。`,
+        );
+      } else if (written.reason === "unsupported") {
+        ctx.logger?.warn?.(
+          `dsh-waifu-agents: 人设「${item.id}」的记忆文件是更新版本写的（v${written.version}），这一轮没有写入。`,
+        );
+      }
     }
   }
 
@@ -2997,6 +3122,8 @@ export function apply(ctx, config = {}) {
   });
   ctx.on("agent/disposed", ({ agent }) => {
     toolFilter?.forget(agent);
+    /* 会话可能还没建出 `agent.session`（销毁在中途），两个来源都试一次。 */
+    forgetSessionTurns(oneLine(agent?.session?.id) || oneLine(agent?.id));
   });
   ctx.on("dispose", () => toolFilter?.dispose());
 
@@ -3060,6 +3187,7 @@ export function apply(ctx, config = {}) {
     normalizeOrder,
     oneLine,
     parseFrontMatter,
+    presetPlacement,
     registrationRev,
     renderPersona,
     reserved,
@@ -3261,6 +3389,7 @@ export function apply(ctx, config = {}) {
    */
   const {
     refreshMemorySnapshot,
+    noteStoreInSnapshot,
     personaMemoryForTeam,
     currentPersonaIdOf,
     memorySnapOf,
@@ -3297,6 +3426,10 @@ export function apply(ctx, config = {}) {
     recallEntries,
     recentEntries,
     renderMemoryBlock,
+    SNAPSHOT_LOCK,
+    forgetStore,
+    mutateStore,
+    runExclusive,
     trimToLimit,
     updateConfig,
     writeStore,

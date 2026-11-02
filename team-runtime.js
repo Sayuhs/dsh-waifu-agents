@@ -82,17 +82,19 @@ import {
   MEMORY_WINDOW_CHARS,
   appendRound,
   applySummary,
+  clearAllMemory,
   emptyMemory,
+  invalidateMemory,
+  memoryGeneration,
   memoryTtlMsFromDays,
   readMemory,
   renderMemoryBlock,
+  saveMemory,
   summaryPrompt,
   trimBacklog,
-  writeMemory,
 } from "./team-memory.js";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
-import path from "node:path";
 
 /**
  * 值得再请求一次的失败类别，以及各自要花掉多少次尝试。
@@ -982,6 +984,12 @@ export function installTeamRuntime(ctx, deps) {
     let memBlock = "";
     let memoryOn = false;
     let memKey = "";
+    /*
+     * 这一轮**拿到记忆时**的世代。收尾写入在锁内拿它比对：不一致说明用户
+     * 在这中间按了「清空团队记忆」，于是这次写入被丢弃 —— 否则它写回去的
+     * 正是用户刚清掉的东西。
+     */
+    let memGeneration = memoryGeneration();
     let finalRaw = "";
 
     /*
@@ -1057,13 +1065,19 @@ export function installTeamRuntime(ctx, deps) {
             memoryCache.set(memKey, mem);
           }
           if (mem.backlog.length > 0) {
+            /*
+             * 折叠期间可能又有批次被驱逐进来（另一个实例、热重载之后接手
+             * 的 fiber、同一会话的下一次收尾）。所以先把"这一次要折的批次"
+             * 拷一份，折完只移除这些 —— 而不是清空整个 backlog。
+             */
+            const batch = [...mem.backlog];
             const folded = await foldSummary(llm, {
               options,
               budget,
               oldSummary: mem.summary,
-              batch: mem.backlog.join("\n"),
+              batch: batch.join("\n"),
             });
-            if (folded !== null) applySummary(mem, folded);
+            if (folded !== null) applySummary(mem, folded, batch);
             else trimBacklog(mem);
           }
           memBlock = renderMemoryBlock(mem);
@@ -1822,9 +1836,22 @@ export function installTeamRuntime(ctx, deps) {
             trimBacklog(mem);
           }
           mem.updatedAt = Date.now();
-          writeMemory(deps.memoryDir, memKey, mem).catch((error) => {
-            warn(`写团队记忆失败：${error?.message ?? error}`);
-          });
+          /*
+           * 写入走 `saveMemory`：同一个会话 × 团队的两次写入排队（rename
+           * 不再乱序），并与「清空」互斥；世代不符说明这一轮在清空之前就
+           * 开始了，于是整份丢弃。
+           */
+          saveMemory(deps.memoryDir, memKey, mem, { generationAtStart: memGeneration })
+            .then((outcome) => {
+              if (outcome?.ok === false && outcome.reason === "cleared") {
+                warn("这一轮团队记忆在清空之后才写完，已丢弃（清空作废了它之前启动的那一轮）。");
+              } else if (outcome?.ok === false && outcome.reason === "unsupported") {
+                warn(`团队记忆文件是更新版本写的（v${outcome.version}），这一轮没有写入。`);
+              }
+            })
+            .catch((error) => {
+              warn(`写团队记忆失败：${error?.message ?? error}`);
+            });
         }
       }
     })();
@@ -2376,30 +2403,24 @@ export function installTeamRuntime(ctx, deps) {
     /**
      * 忘掉每个会话的团队记忆——面板的「清空团队记忆」。
      *
-     * 先清缓存（活缓存底下磁盘被清空，下次读取会把回合复活），然后是记忆目录里
-     * 的每一个 `.json`。
+     * 三步的顺序是这个函数存在的全部理由：
+     *
+     *   1. **先作废在途写入**（`invalidateMemory`）。正在收尾的那一轮手里
+     *      握着一份 `mem`，删完之后它会整份写回去 —— 用户看到的就是「清空了，
+     *      过一会记忆又回来了」。作废必须在删除之前、在用户按下按钮的那一刻。
+     *   2. 清缓存（活缓存底下磁盘被清空，下次读取会把回合复活）。
+     *   3. 删文件（`clearAllMemory` 在全局变更锁里做，所以删除期间没有写入
+     *      在飞）。
+     *
+     * 清空之后开始的回合拿到的是新世代，照常写入 —— 清空只作废它之前启动的
+     * 工作。
      * @returns {Promise<number>} 删除了多少个文件。
      */
     async clearMemory() {
+      invalidateMemory();
       memoryCache.clear();
       if (typeof deps.memoryDir !== "string" || deps.memoryDir === "") return 0;
-      let removed = 0;
-      let entries = [];
-      try {
-        entries = await fs.promises.readdir(deps.memoryDir);
-      } catch {
-        return 0;
-      }
-      for (const name of entries) {
-        if (!name.endsWith(".json")) continue;
-        try {
-          await fs.promises.rm(path.join(deps.memoryDir, name), { force: true });
-          removed += 1;
-        } catch {
-          /* 一个顽固的文件不许拦住其余的 */
-        }
-      }
-      return removed;
+      return clearAllMemory(deps.memoryDir);
     },
     /** 暴露给 selftest，让递归防线可以离线驱动。 */
     isDelegated,

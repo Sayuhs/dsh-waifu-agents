@@ -19,6 +19,19 @@
  * `readStore` 只能把它当损坏文件降级成空 —— 也就是一次写失败抹掉全部记忆。
  * 先写 `.tmp` 再 `rename`，崩溃时旧的完整文件仍在原处。
  *
+ * ## 为什么还要一把锁
+ *
+ * 原子替换解决的是"写坏了"，不是"写丢了"。这条路径是**读 - 改 - 写**：
+ * 读出文件、追加一条、整份写回。两个会话同时结束回合时，两次读都会落在
+ * 任何一次写之前，后写的那一份把先写的整份盖掉 —— 文件是完整的，内容却是
+ * 少的。所以所有落盘都必须经过 {@link mutateStore}：它把「重读 → 改 → 写」
+ * 放进 `persona:<id>` 的队列里，后写的人看见前一个人刚写下的东西。
+ *
+ * 清空走 {@link forgetStore}：它在被调用的那一刻递增世代，于是"清空之前
+ * 启动、清空之后才轮到"的写入会被丢弃，而不是把刚清掉的内容写回去。
+ *
+ * 这把锁只在进程内有效，不提供跨进程一致性（见 `serialize.js`）。
+ *
  * ## 为什么不引入分词库
  *
  * 中文场景下"分词 + IDF"确实能提升召回，但本模块的语料尺度是
@@ -30,9 +43,45 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { bumpGeneration, generationOf, runExclusive } from "./serialize.js";
 
 /** 单个人设记忆文件的 schema 版本号。 */
 export const PERSONA_MEMORY_VERSION = 1;
+
+/**
+ * 存储层的默认后端。
+ *
+ * 每个读写函数都接受一个可选的 `io`（`node:fs/promises` 的那个子集），生产
+ * 路径一律用这个默认值。抽出来只为一件事：并发套件需要**可控的暂停点**，
+ * 而暂停点必须落在真实的文件调用上，否则测试要靠在真实时钟上抢时序才算得出
+ * 交错 —— 那种测试会在慢机器上随机变红，最终被迫删掉。
+ *
+ * 换后端**不**改变任何语义：所有路径仍然先写临时文件再 rename。
+ */
+const defaultIo = fs;
+
+/**
+ * 这一个人设的写锁 / 世代键。
+ *
+ * 粒度就是人设 id：同一个人设的写入彼此排队，不同人设完全并行 ——
+ * 一场回合结束不该等别人的人设写完。
+ * @param {string} personaId
+ */
+export function personaLockKey(personaId) {
+  return `persona:${safePersonaId(personaId)}`;
+}
+
+/**
+ * 快照（注入缓存）与写路径之间的次序锁。
+ *
+ * 快照是同步读取的注入缓存，磁盘才是权威。两条路都要改它：写入方在落盘后
+ * 把新仓储塞进去，刷新则整份重读。少了这把锁，刷新可能用一份**比刚写进去
+ * 的更新更旧**的读结果覆盖快照，于是新记忆要等到下一次刷新才会被注入。
+ */
+export const SNAPSHOT_LOCK = "persona:__snapshot__";
+
+/** 配置文件的读-改-写锁。`_config.json` 是全人设共享的一份。 */
+const CONFIG_LOCK = "persona:__config__";
 
 /** 人设保留的条目数，超过后最旧的未固定条目会被丢弃。 */
 export const DEFAULT_MAX_ENTRIES = 20;
@@ -206,10 +255,10 @@ export function effectiveEnabled(config, personaId) {
 }
 
 /** 读取共享配置；文件缺失或损坏时返回默认值。 */
-export async function readConfig(dir) {
+export async function readConfig(dir, io = defaultIo) {
   let raw;
   try {
-    raw = await fs.readFile(configFilePath(dir), "utf8");
+    raw = await io.readFile(configFilePath(dir), "utf8");
   } catch {
     return emptyConfig();
   }
@@ -221,9 +270,9 @@ export async function readConfig(dir) {
 }
 
 /** 用与各存储相同的"先写临时文件再改名"纪律持久化配置。 */
-export async function writeConfig(dir, config) {
+export async function writeConfig(dir, config, io = defaultIo) {
   const body = JSON.stringify(normalizeConfig(config), null, 2);
-  await writeAtomic(configFilePath(dir), body);
+  await writeAtomic(configFilePath(dir), body, io);
 }
 
 /**
@@ -233,24 +282,29 @@ export async function writeConfig(dir, config) {
  * 全局的 `enabled`，别的一概不碰。这里是唯一的写入方，因此
  * "关掉全局开关不会清掉任何自己的开关"是结构上保证的，
  * 而不是靠每个调用点的自觉。
+ *
+ * 整段放在配置锁里：这也是一次读-改-写，而面板的两个开关可以挨着点。
  * @param {string} dir
  * @param {{enabled?: boolean, captureToolTurns?: boolean, persona?: string, personaEnabled?: boolean, maxEntries?: number}} patch
+ * @param {object} [io]
  */
-export async function updateConfig(dir, patch) {
-  const current = await readConfig(dir);
-  if (typeof patch?.enabled === "boolean") current.enabled = patch.enabled;
-  if (typeof patch?.captureToolTurns === "boolean")
-    current.captureToolTurns = patch.captureToolTurns;
-  const id = safePersonaId(patch?.persona);
-  if (id !== "") {
-    const row = personaConfigOf(current, id);
-    current.personas[id] = {
-      enabled: typeof patch.personaEnabled === "boolean" ? patch.personaEnabled : row.enabled,
-      maxEntries: patch.maxEntries === undefined ? row.maxEntries : clampMaxEntries(patch.maxEntries),
-    };
-  }
-  await writeConfig(dir, current);
-  return current;
+export async function updateConfig(dir, patch, io = defaultIo) {
+  return runExclusive(CONFIG_LOCK, async () => {
+    const current = await readConfig(dir, io);
+    if (typeof patch?.enabled === "boolean") current.enabled = patch.enabled;
+    if (typeof patch?.captureToolTurns === "boolean")
+      current.captureToolTurns = patch.captureToolTurns;
+    const id = safePersonaId(patch?.persona);
+    if (id !== "") {
+      const row = personaConfigOf(current, id);
+      current.personas[id] = {
+        enabled: typeof patch.personaEnabled === "boolean" ? patch.personaEnabled : row.enabled,
+        maxEntries: patch.maxEntries === undefined ? row.maxEntries : clampMaxEntries(patch.maxEntries),
+      };
+    }
+    await writeConfig(dir, current, io);
+    return current;
+  });
 }
 
 /** 单个人设的空存储。 */
@@ -269,12 +323,24 @@ export function clampEntryText(text, cap = ENTRY_MAX_CHARS) {
  * 用解析出的任意内容重建一个存储，丢弃无法使用的行。
  * 没有文本的行不是记忆；kind 未知的行按剧情（episode）处理，
  * 因为猜成"stable"会让它跨团队生效。
+ *
+ * 版本号是唯一一处「宁可什么都不给」的地方。逐字段重建会把当前版本不认识的
+ * 字段全部丢掉，而写入又是整份覆盖 —— 于是一次「装回旧版插件」就会把
+ * 未来版本写下的结构永久压平，用户看到的是「升级过一次之后记忆回退了」。
+ * 所以读到比自己新的版本时返回一份**只读**的空存储（带 `unsupported`），
+ * 由写入方拒绝覆盖，文件原样留在磁盘上。
+ *
+ * `v` 缺失按当前版本处理：存量文件的形状就是当前形状，没有未来字段可丢。
  * @param {unknown} raw
  * @param {string} personaId
  */
 export function normalizeStore(raw, personaId) {
   const out = emptyStore(personaId);
   if (raw === null || typeof raw !== "object") return out;
+  const version = Number(raw.v);
+  if (Number.isInteger(version) && version > PERSONA_MEMORY_VERSION) {
+    return { ...emptyStore(personaId), unsupported: version };
+  }
   const rows = Array.isArray(raw.entries) ? raw.entries : [];
   for (const row of rows) {
     if (row === null || typeof row !== "object") continue;
@@ -305,31 +371,81 @@ function normalizeSource(raw) {
 }
 
 /**
+ * 读到比自己新的版本时留一份降级备份。
+ *
+ * 为什么不直接拒绝读：用户的记忆还在文件里，面板至少应该能说「这个文件是
+ * 更新版本写的，先升级插件」。备份是给「用户决定装回旧版」那一刻准备的 ——
+ * 旧版本一旦写入就会压平未知字段，而备份在写入发生之前就已经存在。
+ *
+ * 备份绝不能把一次读取变成一次失败：备不出来就只是没有备份。
+ * @param {string} file
+ * @param {number} version
+ * @param {object} io
+ * @returns {Promise<string>} 备份路径，没备成时为 ""
+ */
+async function keepDowngradeCopy(file, version, io = defaultIo) {
+  const backup = `${file}.bak-v${version}`;
+  try {
+    await io.access(backup);
+    return backup;
+  } catch {
+    /* 还没有备份：这一次备一份。 */
+  }
+  try {
+    await io.copyFile(file, backup);
+    return backup;
+  } catch {
+    return "";
+  }
+}
+
+/**
  * 读取单个人设的记忆。文件损坏时返回一个标记 `broken` 的空存储，
  * 让面板能提示"这个文件读不出来"，而不是悄悄展示一个失忆的人设。
  * @param {string} dir
  * @param {string} personaId
+ * @param {object} [io]
  */
-export async function readStore(dir, personaId) {
+export async function readStore(dir, personaId, io = defaultIo) {
   const id = safePersonaId(personaId);
   if (id === "") return { ...emptyStore(""), broken: false };
   let raw;
   try {
-    raw = await fs.readFile(storeFilePath(dir, id), "utf8");
+    raw = await io.readFile(storeFilePath(dir, id), "utf8");
   } catch {
     return { ...emptyStore(id), broken: false };
   }
+  let parsed;
   try {
-    return { ...normalizeStore(JSON.parse(raw), id), broken: false };
+    parsed = JSON.parse(raw);
   } catch {
     return { ...emptyStore(id), broken: true };
   }
+  const store = normalizeStore(parsed, id);
+  if (store.unsupported > 0) {
+    await keepDowngradeCopy(storeFilePath(dir, id), store.unsupported, io);
+  }
+  return { ...store, broken: false };
 }
 
-/** 原子地写入单个人设的记忆。 */
-export async function writeStore(dir, store) {
+/**
+ * 原子地写入单个人设的记忆。
+ *
+ * 拒绝写一份「比自己新的版本」的存储，返回 `{ok:false, reason:"unsupported"}`。
+ * 抛错会把一次普通的保存变成一次异常回显，而这里的正确回应是「什么都不写，
+ * 把话说清楚」。
+ * @param {string} dir
+ * @param {object} store
+ * @param {object} [io]
+ * @returns {Promise<{ok: boolean, reason?: string, version?: number}>}
+ */
+export async function writeStore(dir, store, io = defaultIo) {
   const id = safePersonaId(store?.personaId);
   if (id === "") throw new Error("persona-memory: 缺少 personaId，无法写入");
+  const unsupported = Number(store?.unsupported);
+  if (Number.isInteger(unsupported) && unsupported > 0) {
+    return { ok: false, reason: "unsupported", version: unsupported };
+  }
   const body = JSON.stringify(
     {
       v: PERSONA_MEMORY_VERSION,
@@ -339,15 +455,90 @@ export async function writeStore(dir, store) {
     null,
     2,
   );
-  await writeAtomic(storeFilePath(dir, id), body);
+  await writeAtomic(storeFilePath(dir, id), body, io);
+  return { ok: true };
 }
 
 /** 先写临时文件再改名，存储与配置共用。 */
-async function writeAtomic(file, body) {
-  await fs.mkdir(path.dirname(file), { recursive: true });
+async function writeAtomic(file, body, io = defaultIo) {
+  await io.mkdir(path.dirname(file), { recursive: true });
   const tmp = `${file}.${randomUUID().slice(0, 8)}.tmp`;
-  await fs.writeFile(tmp, body, "utf8");
-  await fs.rename(tmp, file);
+  await io.writeFile(tmp, body, "utf8");
+  await io.rename(tmp, file);
+}
+
+/* ------------------------------------------------------------ 锁内读写 */
+
+/**
+ * 在一个人设的锁里做一次「读 - 改 - 写」。
+ *
+ * `fn` 拿到的是**锁内重读**的存储 —— 这才是与「写入方把手里那份当成真相」
+ * 相反的那一半，也是并发丢更新真正消失的地方：谁后写，谁就看见前一个人
+ * 刚写下的内容。
+ *
+ * `fn` 返回 `{write: false, result}` 表示「有结论，但不写盘」（重复行、
+ * 找不到条目、内容非法都走这条），返回 `{store, result}` 则整份写回。
+ *
+ * 两次世代比对之间的含义：
+ *   - 进锁前取一次，进锁后立刻比对 —— 排在「清空」后面的旧任务在这里被丢弃；
+ *   - 写入方自己永远拿得到新世代，所以清空之后开始的任务照常写。
+ * @param {string} dir
+ * @param {string} personaId
+ * @param {(store: object) => ({store?: object, write?: boolean, result?: any} | null)} fn
+ * @param {{io?: object}} [options]
+ * @returns {Promise<{ok: boolean, reason?: string, version?: number, store?: object, result?: any, skipped?: boolean}>}
+ */
+export async function mutateStore(dir, personaId, fn, options = {}) {
+  const id = safePersonaId(personaId);
+  if (id === "") return { ok: false, reason: "no-id" };
+  const io = options.io ?? defaultIo;
+  const key = personaLockKey(id);
+  const generation = generationOf(key);
+  return runExclusive(key, async () => {
+    if (generationOf(key) !== generation) return { ok: false, reason: "cleared" };
+    const store = await readStore(dir, id, io);
+    if (store.unsupported > 0) {
+      return { ok: false, reason: "unsupported", version: store.unsupported, store };
+    }
+    const outcome = (await fn(store)) ?? null;
+    if (outcome === null || outcome.write === false || outcome.store === undefined) {
+      return { ok: true, skipped: true, result: outcome?.result, store };
+    }
+    const written = await writeStore(dir, outcome.store, io);
+    if (written.ok !== true) {
+      return { ok: false, reason: written.reason, version: written.version, store };
+    }
+    return { ok: true, skipped: false, result: outcome.result, store: outcome.store };
+  });
+}
+
+/**
+ * 清空一个人设的记忆：先作废在途写入，再在锁里删除。
+ *
+ * 顺序是这个函数存在的全部理由。世代必须在**被调用时**递增（而不是等删除
+ * 拿到锁），否则「按下清空之后、删除真正执行之前」这段时间里已启动的写入
+ * 会被当成新任务放行，删完之后再把整份内容写回去 —— 也就是用户报过的
+ * 「清空了，过一会记忆又回来了」。
+ *
+ * 版本更高的文件不删：那不是当前版本写的东西，删除是唯一不可逆的操作，
+ * 不能拿"顺手清一下"当理由。
+ * @param {string} dir
+ * @param {string} personaId
+ * @param {object} [io]
+ * @returns {Promise<{cleared: boolean, reason?: string, version?: number}>}
+ */
+export async function forgetStore(dir, personaId, io = defaultIo) {
+  const id = safePersonaId(personaId);
+  if (id === "") return { cleared: false, reason: "no-id" };
+  const key = personaLockKey(id);
+  bumpGeneration(key);
+  return runExclusive(key, async () => {
+    const store = await readStore(dir, id, io);
+    if (store.unsupported > 0) {
+      return { cleared: false, reason: "unsupported", version: store.unsupported };
+    }
+    return { cleared: await clearStore(dir, id, io) };
+  });
 }
 
 /**
@@ -613,48 +804,49 @@ export function renderMemoryBlock(rows, options = {}) {
  * @param {string} dir
  * @param {string} fromId
  * @param {string} toId
+ * @param {object} [io]
  * @returns {Promise<{moved: boolean, reason?: string}>}
  */
-export async function migratePersona(dir, fromId, toId) {
+export async function migratePersona(dir, fromId, toId, io = defaultIo) {
   const from = safePersonaId(fromId);
   const to = safePersonaId(toId);
   if (from === "" || to === "" || from === to) return { moved: false, reason: "noop" };
   const source = storeFilePath(dir, from);
   const target = storeFilePath(dir, to);
   try {
-    await fs.access(source);
+    await io.access(source);
   } catch {
     return { moved: false, reason: "absent" };
   }
   try {
-    await fs.access(target);
+    await io.access(target);
     return { moved: false, reason: "target-exists" };
   } catch {
     // 目标位置空闲：这正是我们想要的情况。
   }
   try {
-    await fs.mkdir(dir, { recursive: true });
-    await fs.rename(source, target);
+    await io.mkdir(dir, { recursive: true });
+    await io.rename(source, target);
   } catch (error) {
     return { moved: false, reason: `failed:${error?.message ?? error}` };
   }
   /* 每人设的配置行随文件一起迁移，否则新 id 会悄悄继承默认值
      （启用，20 条），而不是用户设置的内容。 */
-  const config = await readConfig(dir);
+  const config = await readConfig(dir, io);
   if (config.personas[from] !== undefined) {
     config.personas[to] = config.personas[from];
     delete config.personas[from];
-    await writeConfig(dir, config);
+    await writeConfig(dir, config, io);
   }
   return { moved: true };
 }
 
 /** 删除单个人设的记忆文件。不存在也没关系。 */
-export async function clearStore(dir, personaId) {
+export async function clearStore(dir, personaId, io = defaultIo) {
   const id = safePersonaId(personaId);
   if (id === "") return false;
   try {
-    await fs.rm(storeFilePath(dir, id), { force: true });
+    await io.rm(storeFilePath(dir, id), { force: true });
     return true;
   } catch {
     return false;
@@ -662,10 +854,10 @@ export async function clearStore(dir, personaId) {
 }
 
 /** 当前拥有记忆文件的人设 id 列表。 */
-export async function listStoredIds(dir) {
+export async function listStoredIds(dir, io = defaultIo) {
   let names;
   try {
-    names = await fs.readdir(dir);
+    names = await io.readdir(dir);
   } catch {
     return [];
   }

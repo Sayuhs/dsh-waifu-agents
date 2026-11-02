@@ -24,6 +24,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { MEMORY_TTL_DAYS_MAX } from "./team-memory.js";
 
 /* ------------------------------------------------------------- 常量 */
 
@@ -126,14 +127,24 @@ export function adoptStore(parsed) {
 /** 单个团队，读取方可依赖的每个字段都在。 */
 
 /**
- * 归一化保留期字段：非负整数天数，`0` 表示「永久保留」，其余一律取随附的
- * 默认值 7。
+ * 归一化保留期字段：非负整数天数，数字 `0` 表示「永久保留」，其余一律取
+ * 随附的默认值 7。
+ *
+ * 空值必须显式挡在 `Number()` 之前。`Number(null)`、`Number("")`、
+ * `Number(false)`、`Number([])` 全是 `0` —— 少了这道守卫，一个"没填"的字段
+ * 会被读成"永久保留"，而用户从来没有做过这个决定。字符串 `"0"` 同样按默认
+ * 处理：只有真正的数字 0 才是「永久」。
  * @param {unknown} value
  */
 function memoryTtlDaysOf(value) {
+  if (value === null || value === undefined) return 7;
+  if (typeof value === "boolean" || Array.isArray(value)) return 7;
+  if (typeof value === "string" && value.trim() === "") return 7;
   const n = Number(value);
   if (!Number.isFinite(n) || n < 0) return 7;
-  return Math.floor(n);
+  if (n === 0) return typeof value === "number" ? 0 : 7;
+  /* 0 < n < 1 取一天，而不是 floor 成 0 —— 那会变成"永久"。 */
+  return Math.min(Math.max(1, Math.floor(n)), MEMORY_TTL_DAYS_MAX);
 }
 
 /**

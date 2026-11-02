@@ -66,8 +66,9 @@ export const SEG_CLOSE = "〕";
 /**
  * 把用户的一个回合分类为规模等级。
  *
- * 刻意 **不只靠关键词**。关键词是 *信号*，从来不是结论：「哈喽，我遇到一个
- * 很严重的问题」是 `task`，而「好」可能是长讨论中的一个决定。因此判定
+ * 刻意 **不只靠关键词**。关键词是 *信号*，从来不是结论：「好」可能是长讨论
+ * 中的一个决定，而「哈喽，我遇到一个很严重的问题」没有任何任务信号，只是
+ * 超过 12 个字、被挡在社交分支之外，落到最后一行才成为 `task`。因此判定
  * 顺序是：
  *
  *   1. 显式的任务信号（问号、祈使句、任务名词）优先；
@@ -105,8 +106,12 @@ export function classifyTurn(task) {
 
   /*
    * 长度分带。12 字以内的单行几乎总是社交或单纯确认；超过 ~30 就是有实质
-   * 内容的行文，即便以问候开头也不是问候（"哈喽，我遇到一个很严重的问题"）。
-   * `>= 200` 表示任务大到简短回复会真正受伤。
+   * 内容的行文，即便以问候开头也不是问候（「哈喽，我想把整个方案重新梳理
+   * 一遍」）。`>= 200` 表示任务大到简短回复会真正受伤。
+   *
+   * 注意「哈喽，我遇到一个很严重的问题」是 14 字，走不到这里 —— 它会被下面
+   * 的 `len <= 12` 挡在社交分支之外，落到最后一行。判成 `task` 是这个落底
+   * 的结果，**不是**命中了任何任务信号。
    */
   const substantive = len >= 30;
   const veryLong = len >= 200;
@@ -528,13 +533,41 @@ export function createSegmentParser({ names }) {
         buffer = rest;
         continue;
       }
-      if (nextOpen >= 0 && readOpen(buffer, nextOpen, valid) !== null) {
-        // 下一位已知发言者开口：这一行在该标记开始处结束。
-        const rest = buffer.slice(nextOpen);
-        buffer = buffer.slice(0, nextOpen);
-        close(events);
-        buffer = rest;
-        continue;
+      if (nextOpen >= 0) {
+        const look = readOpen(buffer, nextOpen, valid);
+        if (look.kind === "valid") {
+          // 下一位已知发言者开口：这一行在该标记开始处结束。
+          const rest = buffer.slice(nextOpen);
+          buffer = buffer.slice(0, nextOpen);
+          close(events);
+          buffer = rest;
+          continue;
+        }
+        if (look.kind === "unknown") {
+          /*
+           * 段落内部出现了一个不在房间里的人。
+           *
+           * 三件事必须同时发生：当前段落在这里结束（否则那个人的台词会被算在
+           * 当前发言者头上）、产生一条 `unknown` 诊断（否则整件事静默）、
+           * **buffer 必须前进**（否则就是修这条缺陷之前的死循环）。
+           * 之后的文本落在段落之外，由上面的游离分支处理 —— 它不属于任何人。
+           */
+          const rest = buffer.slice(look.end);
+          buffer = buffer.slice(0, nextOpen);
+          close(events);
+          events.push(emit({ type: "unknown", name: look.name }));
+          buffer = rest;
+          continue;
+        }
+        if (look.kind === "stray") {
+          /*
+           * 空标记或没被上面 endMark 分支吃掉的 `〔/名字〕`：它是协议噪音，
+           * 不是台词，也不该打断这一段。把标记本身从段落文本里剪掉即可。
+           */
+          buffer = `${buffer.slice(0, nextOpen)}${buffer.slice(look.end)}`;
+          continue;
+        }
+        /* `incomplete`：标记被拆到多个 chunk，等剩余部分。 */
       }
       break;
     }
@@ -854,13 +887,25 @@ export function textOf(personaOf, id) {
 }
 
 /**
- * 如果 `buffer` 从 `at` 开始是一个完整、有效的打开标记，返回其名字。
- * 否则返回 `null`——调用方等待更多 token。
+ * 读一个打开标记，并说清它是哪一种。
+ *
+ * 三态而不是"名字或 null"：`null` 把**两件完全不同的事**混成一件 ——
+ * "标记还没收完，等下一个 token" 与 "标记完整但这个人不在房间里"。
+ * 混在一起时调用方只能选择等待，而等待一个永远不会变完整的标记就是死循环：
+ * 段落内部的 `buffer.indexOf(SEG_OPEN)` 会永远指向同一个未知标记，解析器
+ * 从此不再前进，标记之后的所有台词被并进当前发言者一行，诊断里一条都没有。
+ *
+ * @param {string} buffer
+ * @param {number} at `〔` 的位置
+ * @param {Set<string>} valid 合法显示名
+ * @returns {{kind: 'valid'|'unknown'|'stray'|'incomplete', name?: string, end?: number}}
  */
 function readOpen(buffer, at, valid) {
   const close = buffer.indexOf(SEG_CLOSE, at + SEG_OPEN.length);
-  if (close < 0) return null;
+  if (close < 0) return { kind: "incomplete" };
   const token = buffer.slice(at + SEG_OPEN.length, close).trim();
-  if (token === "" || token.startsWith("/")) return null;
-  return valid.has(token) ? token : null;
+  const end = close + SEG_CLOSE.length;
+  /* 空标记与 `〔/名字〕`（没有被前面那条 endMark 分支吃掉的）都不是开场。 */
+  if (token === "" || token.startsWith("/")) return { kind: "stray", end };
+  return valid.has(token) ? { kind: "valid", name: token, end } : { kind: "unknown", name: token, end };
 }

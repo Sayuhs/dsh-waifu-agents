@@ -95,6 +95,9 @@ window.__ModuleLoader__.load({
         tabMemory: '记忆',
         search: '搜索名字、简述或正文…',
         add: '新增',
+        /* 两个编辑器的窗口标题：'新增人设' / '编辑人设'。 */
+        personaNew: '新增人设',
+        personaEdit: '编辑人设',
         import: '导入 md',
         exportAll: '导出全部',
         exportOne: '导出这一条',
@@ -196,7 +199,8 @@ window.__ModuleLoader__.load({
         name: '名字',
         description: '简述',
         bodyPlaceholder: '只写她独有的部分；公共条款在骨架里',
-        autosave: '改动会在离开输入框时自动保存',
+        save: '保存',
+        saveHint: '改动要点「保存」才会写入',
         nameDrivesFile: '文件名会跟着「名字」走',
         saving: '保存中…',
         saved: '已保存',
@@ -433,6 +437,8 @@ window.__ModuleLoader__.load({
         tabMemory: 'Memory',
         search: 'Search name, summary or body…',
         add: 'New',
+        personaNew: 'New persona',
+        personaEdit: 'Edit persona',
         import: 'Import md',
         exportAll: 'Export all',
         exportOne: 'Export this file',
@@ -528,7 +534,8 @@ window.__ModuleLoader__.load({
         name: 'Name',
         description: 'Summary',
         bodyPlaceholder: 'Only her own part; the shared clauses live in the skeleton',
-        autosave: 'Edits are written when the field loses focus',
+        save: 'save',
+        saveHint: 'Changes are written when you press Save',
         nameDrivesFile: 'The file name follows this name',
         saving: 'Saving…',
         saved: 'Saved',
@@ -1036,6 +1043,26 @@ window.__ModuleLoader__.load({
         borderRadius: 'var(--dsw-radius-panel, 12px)',
         background: 'var(--dsw-alias-bg-layer-2)',
       },
+      /*
+       * The wide dialog behind `Sheet`. Same surface as `dialog`, but its height
+       * is capped and its body scrolls: a persona body can be arbitrarily long,
+       * and a window taller than the viewport puts the close button off screen.
+       */
+      sheet: {
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '12px',
+        maxWidth: 'calc(100vw - 48px)',
+        maxHeight: '86vh',
+        padding: '16px',
+        border: '1px solid var(--dsw-alias-border-l2)',
+        borderRadius: 'var(--dsw-radius-panel, 12px)',
+        background: 'var(--dsw-alias-bg-layer-2)',
+        boxSizing: 'border-box',
+        boxShadow: '0 18px 48px rgba(0, 0, 0, 0.28)',
+      },
+      sheetHead: { display: 'flex', alignItems: 'flex-start', gap: '8px' },
+      sheetBody: { display: 'flex', flexDirection: 'column', gap: '10px', overflow: 'auto', minHeight: 0 },
       dragging: { opacity: 0.45 },
       reorderRow: { cursor: 'grab', userSelect: 'none' },
       dropTarget: { borderColor: 'var(--dsw-alias-state-business-primary)', borderStyle: 'dashed' },
@@ -1570,6 +1597,75 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 一块从中间升起的面板：新增/编辑人设、新建/编辑团队、查看组装结果都用它。
+     *
+     * 为什么不用平台的 `Modal`：它的宽度不在本运行时的契约里（面板拿到的
+     * 只有 `Button`/`Tag`/`MarkdownText` 的已核实形状），而这三样恰恰需要
+     * 比一句确认宽得多的版面——整段正文、一列成员勾选、一整份组装后的
+     * 提示词。`Confirm` / `Alert` 那种一句话对话框仍然走平台，两者不冲突：
+     * 这里只借用同一层遮罩色和同一套主题 token。
+     *
+     * 收尾路径分两档。未锁定时三条都要有：右上角的关闭、点遮罩、Esc——少一
+     * 条，用户就会在某一次编辑后发现"关不掉"，而那正是弹窗最容易招人烦的地
+     * 方。锁定（`locked`）时只剩显式按钮：编辑器正攥着一份未保存的草稿，一
+     * 次走神的点击落在遮罩上、或者一个惯性 Esc，就把整段正文无声丢掉——这
+     * 种"没有确认、没有恢复"的丢失比关不掉恶劣得多，所以两个编辑器都锁。
+     */
+    function Sheet({ open, title, hint, width, t, onClose, footer, children, locked }) {
+      React.useEffect(() => {
+        if (open !== true) return undefined;
+        if (locked === true) return undefined;
+        const onKey = (event) => {
+          if (event.key === 'Escape') onClose();
+        };
+        document.addEventListener('keydown', onKey);
+        return () => document.removeEventListener('keydown', onKey);
+      }, [open, onClose, locked]);
+      if (open !== true) return null;
+      return h(
+        'div',
+        {
+          style: { ...L.overlay, zIndex: 60 },
+          // 锁定时遮罩不再接 onClose：点外面什么也不发生，关窗只能走按钮。
+          onClick: locked === true ? undefined : onClose,
+        },
+        h(
+          'div',
+          {
+            style: { ...L.sheet, width: width ?? '760px' },
+            role: 'dialog',
+            'aria-modal': 'true',
+            'aria-label': title,
+            // A click that landed on the window itself — typing, selecting
+            // text, dragging the scrollbar — must not close it.
+            onClick: (event) => event.stopPropagation(),
+          },
+          h(
+            'div',
+            { style: L.sheetHead },
+            h(
+              'div',
+              { style: L.rowMain },
+              h('span', { style: L.rowTitle }, title),
+              hint === undefined || hint === null || hint === '' ? null : h('span', { style: L.hint }, hint),
+            ),
+            h(Btn, {
+              variant: 'toolbar',
+              size: 'sm',
+              icon: h(Icon, { name: 'close', size: 16 }),
+              title: t('close'),
+              'aria-label': t('close'),
+              style: { padding: '0 6px' },
+              onClick: onClose,
+            }),
+          ),
+          h('div', { style: L.sheetBody }, children),
+          footer ?? null,
+        ),
+      );
+    }
+
+    /**
      * A v4 UUID, minted by the PANEL rather than the Host.
      *
      * The id has to be known BEFORE the launch request goes out: the platform
@@ -1831,8 +1927,8 @@ window.__ModuleLoader__.load({
      * a draft with unsaved keystrokes in it, and a preview that reads from the
      * draft can never be what the model sees. This one is fetched from the Host
      * (`get` again), so it shows the file as it is on disk with the skeleton
-     * poured in — and `openPreview` waits for the autosave the click itself
-     * triggered, so "on disk" means "including what you just typed".
+     * poured in — "on disk" now means "the last version you pressed Save on";
+     * edits still in the editor are deliberately not in it.
      */
     function PreviewWindow({ open, title, text, loading, error, t, onClose }) {
       if (open !== true) return null;
@@ -1847,41 +1943,21 @@ window.__ModuleLoader__.load({
                 h(Markdown, { text: text ?? '' }),
               );
       /*
-       * The platform's own dialog, like the confirmations next to it — the same
-       * mask, the same close button, the same Escape handling. A hand-rolled
-       * overlay next to a platform dialog is two dialogs wearing one panel.
+       * The same wide window the two editors use, for two reasons.
+       *
+       * Width: this shows the assembled prompt — the thing the model actually
+       * receives — and it was being read through a 560px column, which is
+       * narrower than the editor that produced it. Reading the result should
+       * not be harder than writing it.
+       *
+       * Consistency: the editor that this opens from is a Sheet, so a
+       * different dialog shape one click later would read as two different
+       * products sharing a page.
        */
-      if (primitives !== null && typeof primitives.Modal === 'function') {
-        return h(primitives.Modal, { open: true, onClose, title, closeLabel: t('close'), children: content });
-      }
       return h(
-        'div',
-        { style: L.overlay, onClick: onClose },
-        h(
-          'div',
-          {
-            style: { ...L.dialog, maxWidth: '560px', width: '100%' },
-            // The backdrop closes it; a click that landed on the window itself
-            // — reading, selecting text — must not.
-            onClick: (event) => event.stopPropagation(),
-          },
-          h(
-            'div',
-            { style: L.bar },
-            h('span', { style: L.rowTitle }, title),
-            h('div', { style: L.push }),
-            h(Btn, {
-              variant: 'toolbar',
-              size: 'sm',
-              icon: h(Icon, { name: 'close', size: 16 }),
-              title: t('close'),
-              'aria-label': t('close'),
-              style: { padding: '0 6px' },
-              onClick: onClose,
-            }),
-          ),
-          content,
-        ),
+        Sheet,
+        { open: true, title, width: '980px', t, onClose },
+        content,
       );
     }
 
@@ -1932,7 +2008,20 @@ window.__ModuleLoader__.load({
       );
     }
 
-    function Editor({ draft, t, busy, onPatch, onCommit }) {
+    /*
+     * 人设编辑器：弹窗里的一张表，改动**不**自动保存。
+     *
+     * 曾经每个输入框失焦就写一次盘（"改动会在离开输入框时自动保存"）。
+     * 那意味着"保存"这个动作不可见：点谁、路过谁都会触发一次写入，而
+     * 写一半想去看看别人、再回来的路上一句话已经被存成了半句。现在写入
+     * 只有一个入口——下面的「保存」按钮；关掉窗口（× 或「取消」）丢掉
+     * 没保存的改动，文件保持上一次保存的样子。
+     *
+     * `dirty` 由调用方算（`draftKeyOf(draft) !== draft.savedKey`）：它让
+     * 「保存」在没有改动时是灰的，替代旧模型里"没改动就不发请求"的
+     * 静默去重——去重还在（`save` 里），只是用户现在也看得见。
+     */
+    function Editor({ draft, t, busy, onPatch, onSave, onCancel, dirty, tall }) {
       const loading = draft.loading === true;
       const field = (label, ...controls) => h('div', { style: L.field }, h('span', { style: L.label }, label), ...controls);
       const text = draft.body ?? '';
@@ -1951,7 +2040,6 @@ window.__ModuleLoader__.load({
                   value: draft.name ?? '',
                   disabled: busy,
                   onChange: (event) => onPatch({ name: event.target.value }),
-                  onBlur: onCommit,
                 }),
               ),
               field(
@@ -1961,7 +2049,6 @@ window.__ModuleLoader__.load({
                   value: draft.description ?? '',
                   disabled: busy,
                   onChange: (event) => onPatch({ description: event.target.value }),
-                  onBlur: onCommit,
                 }),
               ),
               field(
@@ -1971,7 +2058,6 @@ window.__ModuleLoader__.load({
                   value: draft.group ?? '',
                   disabled: busy,
                   onChange: (event) => onPatch({ group: event.target.value }),
-                  onBlur: onCommit,
                 }),
               ),
               field(
@@ -1980,10 +2066,7 @@ window.__ModuleLoader__.load({
                   checked: (draft.template ?? '') === SKELETON_FILE,
                   disabled: busy,
                   title: t('useSkeleton'),
-                  onChange: (next) => {
-                    onPatch({ template: next ? SKELETON_FILE : '' });
-                    onCommit();
-                  },
+                  onChange: (next) => onPatch({ template: next ? SKELETON_FILE : '' }),
                 }),
               ),
               /*
@@ -1993,12 +2076,11 @@ window.__ModuleLoader__.load({
                * exactly one mode and no state to remember.
                */
               h('textarea', {
-                style: L.textarea,
+                style: tall === true ? { ...L.textarea, minHeight: '44vh' } : L.textarea,
                 value: text,
                 disabled: busy,
                 placeholder: t('bodyPlaceholder'),
                 onChange: (event) => onPatch({ body: event.target.value }),
-                onBlur: onCommit,
               }),
               (draft.problems ?? []).length > 0
                 ? h(
@@ -2008,7 +2090,17 @@ window.__ModuleLoader__.load({
                     ...(draft.problems ?? []).map((line, index) => h('div', { key: index, style: L.error }, line)),
                   )
                 : null,
-              h('span', { style: L.hint }, `${t('autosave')} · ${t('nameDrivesFile')}`),
+              h(
+                'div',
+                { style: { ...L.bar, justifyContent: 'space-between', marginTop: '4px' } },
+                h('span', { style: L.hint }, `${t('saveHint')} · ${t('nameDrivesFile')}`),
+                h(
+                  'div',
+                  { style: L.bar },
+                  h(Btn, { variant: 'toolbar', disabled: busy, onClick: onCancel }, t('cancel')),
+                  h(Btn, { variant: 'primary', disabled: busy || dirty === false, onClick: onSave }, t('save')),
+                ),
+              ),
             ),
       );
     }
@@ -2225,9 +2317,9 @@ window.__ModuleLoader__.load({
             'aria-label': t('preview'),
             /*
              * Not disabled while `busy`. Reading does not fight the writer, and
-             * the click that opened this also triggered the autosave (blur
-             * fires first) — disabling here would swallow exactly that click.
-             * `openPreview` waits for the write instead.
+             * an explicit-save editor means the click never starts a write —
+             * the preview shows the last saved version, unsaved keystrokes
+             * stay in the editor where they belong.
              */
             disabled: locked,
             style: { padding: '0 6px' },
@@ -2627,26 +2719,49 @@ window.__ModuleLoader__.load({
       }
       const problem =
         team.problem === null || team.problem === undefined ? null : h('span', { style: L.error }, team.problem);
-      if (draft !== null) {
+      /*
+       * The team editor is a window over the list, the same shape as the
+       * persona editor. It used to replace the list outright: opening one team
+       * hid every other team and the count above them, so the answer to
+       * "is that the one I already have?" was behind the dialog being edited.
+       */
+      const editor =
+        draft === null
+          ? null
+          : h(
+              Sheet,
+              {
+                open: true,
+                title:
+                  draft.name === undefined || draft.name === ''
+                    ? t('teamNew')
+                    : `${t('teamEdit')} · ${draft.name}`,
+                width: '860px',
+                t,
+                onClose: onCancelDraft,
+                // 与人设编辑器同一档：草稿只认显式的取消/保存。
+                locked: true,
+              },
+              h(TeamDraftCard, {
+                draft,
+                t,
+                busy,
+                rows: team.rows,
+                groups: team.groups,
+                onPatch,
+                onSave: onSaveDraft,
+                onCancel: onCancelDraft,
+                problem: fieldProblem,
+              }),
+            );
+      if (team.teams.length === 0) {
         return h(
           'div',
           { style: L.list },
           problem,
-          h(TeamDraftCard, {
-            draft,
-            t,
-            busy,
-            rows: team.rows,
-            groups: team.groups,
-            onPatch,
-            onSave: onSaveDraft,
-            onCancel: onCancelDraft,
-            problem: fieldProblem,
-          }),
+          h('div', { style: L.card }, h('span', { style: L.hint }, t('teamEmpty'))),
+          editor,
         );
-      }
-      if (team.teams.length === 0) {
-        return h('div', { style: L.list }, problem, h('div', { style: L.card }, h('span', { style: L.hint }, t('teamEmpty'))));
       }
       return h(
         'div',
@@ -2742,6 +2857,7 @@ window.__ModuleLoader__.load({
             h(TeamPreview, { preview: entry.preview, t }),
           );
         }),
+        editor,
       );
     }
 
@@ -3547,7 +3663,9 @@ window.__ModuleLoader__.load({
         onImportClick,
         onDownloadTemplate,
         onPatchDraft,
-        onCommit,
+        onSave,
+        dirty,
+        onCloseDraft,
         page,
         pageSize,
         onPage,
@@ -3669,45 +3787,55 @@ window.__ModuleLoader__.load({
             groupFolded(group.key)
               ? null
               : group.rows.map((item) =>
-                  h(
-                    React.Fragment,
-                    { key: item.id },
-                    h(WifeRow, {
-                      item,
-                      t,
-                      open: openId === item.id,
-                      busy,
-                      isDefault: data !== null && data.defaultId === item.id,
-                      broken: brokenById === undefined ? null : (brokenById[item.id] ?? null),
-                      selected: batches.includes(item.id),
-                      batchMode,
-                      onToggle: () => onOpenRow(item),
-                      onSelect: () => onSelect(item.id),
-                      onPreview: () => onPreviewOne(item),
-                      onExport: () => onExportOne(item.id),
-                      onHide: () => onHideOne(item),
-                      onDefault: (next) => onSetDefault(item, next),
-                      dragging,
-                      dropTarget,
-                      reorder: reorderMode === true,
-                      onDragStart,
-                      onDragOver,
-                      onDrop,
-                      onDragEnd,
-                    }),
-                    openId === item.id && draft !== null && draft.id === item.id
-                      ? h(Editor, { draft, t, busy, onPatch: onPatchDraft, onCommit })
-                      : null,
-                  ),
+                  h(WifeRow, {
+                    key: item.id,
+                    item,
+                    t,
+                    open: openId === item.id,
+                    busy,
+                    isDefault: data !== null && data.defaultId === item.id,
+                    broken: brokenById === undefined ? null : (brokenById[item.id] ?? null),
+                    selected: batches.includes(item.id),
+                    batchMode,
+                    onToggle: () => onOpenRow(item),
+                    onSelect: () => onSelect(item.id),
+                    onPreview: () => onPreviewOne(item),
+                    onExport: () => onExportOne(item.id),
+                    onHide: () => onHideOne(item),
+                    onDefault: (next) => onSetDefault(item, next),
+                    dragging,
+                    dropTarget,
+                    reorder: reorderMode === true,
+                    onDragStart,
+                    onDragOver,
+                    onDrop,
+                    onDragEnd,
+                  }),
                 ),
             ),
           ),
-        openId === NEW && draft !== null
+        /*
+         * The editor is a window now, not a row that grew.
+         *
+         * A row sits inside the scrolling list, so opening one pushed everything
+         * below it down, and the body was read through a window four rows tall.
+         * One window, sized for the work, opened over the list: the roster stays
+         * where it was, and closing it cannot leave a half-open row behind.
+         */
+        draft !== null && openId !== null
           ? h(
-              'div',
-              { style: L.list },
-              h('div', { style: { ...L.item, ...L.skeletonRow } }, h('span', { style: L.name }, t('add'))),
-              h(Editor, { draft, t, busy, onPatch: onPatchDraft, onCommit }),
+              Sheet,
+              {
+                open: true,
+                // A new persona has no name yet; the edit draft names itself.
+                title: draft.mode === 'new' ? t('personaNew') : `${t('personaEdit')} · ${draft.name || draft.id}`,
+                width: '820px',
+                t,
+                onClose: onCloseDraft,
+                // 点遮罩、Esc 都不收：草稿只认显式的取消/保存。
+                locked: true,
+              },
+              h(Editor, { draft, t, busy, onPatch: onPatchDraft, onSave, onCancel: onCloseDraft, dirty, tall: true }),
             )
           : null,
         pageCount > 1
@@ -3838,12 +3966,12 @@ window.__ModuleLoader__.load({
       const idAlias = React.useRef(new Map());
       const fileInput = React.useRef(null);
       /**
-       * The autosave currently in flight, if any.
+       * The explicit save currently in flight, if any.
        *
-       * Clicking the eye blurs the textarea first, and blur is what starts the
-       * save — so without this the preview races the write it just triggered
-       * and shows the file one keystroke behind. Preview is a read of the disk,
-       * and a read has to wait for the write in front of it.
+       * Saves start only from the editor's Save button now, so there is no
+       * blur race to lose — but a second click on Save while one write is
+       * still running must not start a duplicate, and `openPreview` keeps
+       * waiting on this slot so a save and a read can never interleave.
        */
       const savingRef = React.useRef(null);
 
@@ -4416,6 +4544,13 @@ window.__ModuleLoader__.load({
               savedKey: written,
             });
           }
+          /*
+           * 保存成功即收窗。写盘已经完成，草稿没有值得留下的东西——这与
+           * 团队编辑器的「成功即 `setTeamDraft(null)`」是同一条约定；留窗
+           * 是失焦自动保存时代的习惯，那时窗口必须开着等下一次失焦。
+           * 失败路径不动：弹窗留在原地，错误贴在窗内。
+           */
+          putDraft(null);
           await load();
           await loadRoster();
         } catch (failure) {
@@ -4430,7 +4565,13 @@ window.__ModuleLoader__.load({
         }
       }
 
-      /** Blur, row switch and unmount all funnel through here. */
+      /**
+       * 编辑器「保存」按钮的唯一入口。
+       *
+       * 曾经失焦也会走到这里（blur → commit），如今唯一的调用方是按钮：
+       * 写盘必须是人按下去的那个动作。`save` 自己做去重——草稿与上一次
+       * 保存一致时不发请求——所以连点两下、或者没改就点，都是空操作。
+       */
       const commit = React.useCallback(() => {
         const current = draftRef.current;
         if (current === null || current.loading === true) return;
@@ -4443,8 +4584,8 @@ window.__ModuleLoader__.load({
         });
       }, []);
 
+      /* 关窗即放弃：没有点「保存」的改动一个字都不落盘。 */
       function closeRow() {
-        commit();
         showRow(null);
         putDraft(null);
         setDialog(null);
@@ -4463,8 +4604,8 @@ window.__ModuleLoader__.load({
         const id = item.id;
         setPeek({ id, name: item.name ?? id, loading: true, text: '', error: '' });
         try {
-          // The blur that opened this window already kicked off a save; reading
-          // first would answer with the previous version of the file.
+          // A save pressed moments ago may still be in flight; reading first
+          // would answer with the previous version of the file.
           if (savingRef.current !== null) await savingRef.current;
           const payload = await post({ op: 'get', id, assembled: true });
           setPeek((prev) =>
@@ -4486,7 +4627,6 @@ window.__ModuleLoader__.load({
           closeRow();
           return;
         }
-        commit();
         setDialog(null);
         setNote(null);
         showRow(item.id);
@@ -4534,7 +4674,6 @@ window.__ModuleLoader__.load({
           closeRow();
           return;
         }
-        commit();
         setDialog(null);
         setNote(null);
         showRow(NEW);
@@ -4561,7 +4700,6 @@ window.__ModuleLoader__.load({
           closeRow();
           return;
         }
-        commit();
         showRow(SKELETON);
         setNote(null);
         putSkeletonDraft({ text: '', slots: 0, nameSlots: 0, problems: [], rev: null, loading: true });
@@ -5472,7 +5610,11 @@ window.__ModuleLoader__.load({
               onImportClick: () => fileInput.current?.click(),
               onDownloadTemplate: downloadTemplate,
               onPatchDraft: patchDraft,
-              onCommit: commit,
+              // 显式保存：只有按钮会写盘。关窗（onCloseDraft）丢掉未保存的改动。
+              onSave: commit,
+              dirty: draft !== null && draft.savedKey !== undefined && draftKeyOf(draft) !== draft.savedKey,
+              // Closing the editor window: drop the draft without writing.
+              onCloseDraft: closeRow,
               onOpenSkeleton: openSkeleton,
               skeletonDraft,
               onPatchSkeleton: patchSkeletonDraft,
