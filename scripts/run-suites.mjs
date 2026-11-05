@@ -34,6 +34,7 @@ const SUITES = [
   "selftest-concurrency.mjs",
   "selftest-tool-filter.mjs",
   "selftest-seed.mjs",
+  "selftest-host-caps.mjs",
 ];
 
 const wanted = process.argv[2] ?? "";

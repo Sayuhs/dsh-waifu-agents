@@ -96,6 +96,7 @@ import os from "node:os";
 import path from "node:path";
 import z from "@deepseek-ai/schemastery";
 import { installTeamRuntime } from "./team-runtime.js";
+import { hostPrunedRows, pruneReport } from "./host-caps.js";
 import { createToolFilter } from "./tool-filter.js";
 import { buildZip } from "./zip.js";
 import { PACKAGE_DIR, PACKAGE_NAME, RUNNING_VERSION } from "./package-meta.js";
@@ -1528,7 +1529,7 @@ export function apply(ctx, config = {}) {
    * @param {"persona" | "team"} kind
    */
   function templateRowsFor(kind) {
-    const rows = readTemplate();
+    const rows = hostPrunedRows(readTemplate());
     return kind === "team" || currentMode === "chat" ? chatRows(rows) : rows;
   }
 
@@ -3224,6 +3225,7 @@ export function apply(ctx, config = {}) {
     serviceOf,
     templatePath,
     templateRowsFor,
+    hostCapsReport: () => pruneReport(),
     verifyDefault,
     writable,
     writeAtomic,
