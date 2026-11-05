@@ -1,5 +1,7 @@
 # dsh-waifu-agents
 
+[![Listed on dsh-plugin.org](https://dsh-plugin.org/badges/listed.svg)](https://dsh-plugin.org/plugins/sayuhs/dsh-waifu-agents)
+
 ![dsh-waifu-agents](icon.png)
 
 给 DSH 装上一批**用 Markdown 写的角色**：会话开到一半能换人，也能让一组角色在同一场对话里一起说话。
